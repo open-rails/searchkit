@@ -34,3 +34,32 @@ of the storage interface that matches its own Postgres schema (typically
 - Postgres storage schema for embeddings + indexes.
 - Business rules and API response shapes.
 
+## Usage (host app)
+
+### 1) Create an embedder
+
+Use `embedder.NewOpenAICompatible(...)` with the provider’s OpenAI-compatible
+base URL + API key + model name.
+
+### 2) Run embeddingkit migrations
+
+`embeddingkit` currently ships only its task table, created in the
+`embeddingkit` schema:
+
+- `embeddingkit.embedding_tasks`
+
+Host apps can apply these migrations during startup/migration flow:
+
+```go
+_ = migrate.ApplyPostgres(ctx, pgxPool, "embeddingkit")
+```
+
+### 3) Enqueue work and run workers
+
+- Enqueue with `tasks.Repo.Enqueue(...)` or `runtime.Runtime.EnqueueTextEmbedding(...)`.
+- Process tasks with `river.TaskBatchWorker` (schedule periodically with River).
+
+The host app provides:
+
+- `runtime.DocumentBuilder` (entity → text),
+- `runtime.Storage` (upsert embedding into the app’s schema).
