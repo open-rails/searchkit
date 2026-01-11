@@ -45,7 +45,7 @@ func (w *TaskBatchWorker) Work(ctx context.Context, job *river.Job[EmbeddingTask
 	}
 
 	for _, t := range tasksToRun {
-		if err := w.Runtime.GenerateAndStoreTextEmbedding(ctx, t.EntityType, t.EntityID, t.Model); err != nil {
+		if err := w.Runtime.GenerateAndStoreEmbedding(ctx, t.EntityType, t.EntityID, t.Model); err != nil {
 			_ = w.TaskRepo.Fail(ctx, t.ID, backoff)
 			continue
 		}
@@ -54,4 +54,3 @@ func (w *TaskBatchWorker) Work(ctx context.Context, job *river.Job[EmbeddingTask
 
 	return nil
 }
-
