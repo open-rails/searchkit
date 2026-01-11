@@ -1,8 +1,8 @@
 -- embeddingkit: task table only (embedding storage is app-owned)
+-- IMPORTANT: this intentionally follows River's pattern: create prefixed tables
+-- in the host application's schema (no separate embeddingkit schema).
 
-CREATE SCHEMA IF NOT EXISTS embeddingkit;
-
-CREATE TABLE IF NOT EXISTS embeddingkit.embedding_tasks (
+CREATE TABLE IF NOT EXISTS embeddingkit_embedding_tasks (
     id bigserial PRIMARY KEY,
     entity_type text NOT NULL,
     entity_id bigint NOT NULL,
@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS embeddingkit.embedding_tasks (
     updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_embedding_tasks_entity_model
-    ON embeddingkit.embedding_tasks(entity_type, entity_id, model);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_embeddingkit_embedding_tasks_entity_model
+    ON embeddingkit_embedding_tasks(entity_type, entity_id, model);
 
-CREATE INDEX IF NOT EXISTS idx_embedding_tasks_ready
-    ON embeddingkit.embedding_tasks(next_run_at, id);
+CREATE INDEX IF NOT EXISTS idx_embeddingkit_embedding_tasks_ready
+    ON embeddingkit_embedding_tasks(next_run_at, id);

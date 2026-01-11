@@ -32,7 +32,7 @@ func quoteIdent(ident string) (string, error) {
 // during its migration phase, or delegate to its own migration runner.
 func ApplyPostgres(ctx context.Context, pool *pgxpool.Pool, schema string) error {
 	if strings.TrimSpace(schema) == "" {
-		schema = "embeddingkit"
+		return fmt.Errorf("schema is required")
 	}
 
 	dirEntries, err := fs.ReadDir(migrations.Postgres, "postgres")
@@ -67,9 +67,6 @@ func ApplyPostgres(ctx context.Context, pool *pgxpool.Pool, schema string) error
 	quotedSchema, err := quoteIdent(schema)
 	if err != nil {
 		return fmt.Errorf("invalid schema: %w", err)
-	}
-	if _, err := tx.Exec(ctx, fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)); err != nil {
-		return fmt.Errorf("create schema: %w", err)
 	}
 	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL search_path = %s", quotedSchema)); err != nil {
 		return fmt.Errorf("set search_path: %w", err)

@@ -43,15 +43,15 @@ base URL + API key + model name.
 
 ### 2) Run embeddingkit migrations
 
-`embeddingkit` currently ships only its task table, created in the
-`embeddingkit` schema:
+`embeddingkit` currently ships only its task table, created in the host app
+schema (River-style prefix):
 
-- `embeddingkit.embedding_tasks`
+- `embeddingkit_embedding_tasks`
 
 Host apps can apply these migrations during startup/migration flow:
 
 ```go
-_ = migrate.ApplyPostgres(ctx, pgxPool, "embeddingkit")
+_ = migrate.ApplyPostgres(ctx, pgxPool, "doujins") // or "hentai0", etc.
 ```
 
 ### 3) Enqueue work and run workers

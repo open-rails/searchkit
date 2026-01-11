@@ -13,10 +13,9 @@ type Repo struct {
 	schema string
 }
 
+const embeddingTasksTable = "embeddingkit_embedding_tasks"
+
 func NewRepo(pool *pgxpool.Pool, schema string) *Repo {
-	if schema == "" {
-		schema = "embeddingkit"
-	}
 	return &Repo{pool: pool, schema: schema}
 }
 
@@ -24,14 +23,17 @@ func (r *Repo) Enqueue(ctx context.Context, entityType string, entityID int64, m
 	if entityType == "" || model == "" {
 		return fmt.Errorf("entityType and model are required")
 	}
+	if r.schema == "" {
+		return fmt.Errorf("schema is required")
+	}
 	q := fmt.Sprintf(`
-		INSERT INTO %s.embedding_tasks (entity_type, entity_id, model, reason)
+		INSERT INTO %s.%s (entity_type, entity_id, model, reason)
 		VALUES ($1, $2, $3, COALESCE($4, 'unknown'))
 		ON CONFLICT (entity_type, entity_id, model) DO UPDATE SET
 			reason = EXCLUDED.reason,
-			next_run_at = LEAST(%s.embedding_tasks.next_run_at, now()),
+			next_run_at = LEAST(%s.%s.next_run_at, now()),
 			updated_at = now()
-	`, r.schema, r.schema)
+	`, r.schema, embeddingTasksTable, r.schema, embeddingTasksTable)
 	_, err := r.pool.Exec(ctx, q, entityType, entityID, model, reason)
 	return err
 }
@@ -45,6 +47,9 @@ func (r *Repo) FetchReady(ctx context.Context, limit int, lockAhead time.Duratio
 	if lockAhead <= 0 {
 		lockAhead = 30 * time.Second
 	}
+	if r.schema == "" {
+		return nil, fmt.Errorf("schema is required")
+	}
 
 	now := time.Now().UTC()
 	next := now.Add(lockAhead)
@@ -52,18 +57,18 @@ func (r *Repo) FetchReady(ctx context.Context, limit int, lockAhead time.Duratio
 	q := fmt.Sprintf(`
 		WITH picked AS (
 			SELECT id
-			FROM %s.embedding_tasks
+			FROM %s.%s
 			WHERE next_run_at <= $1
 			ORDER BY next_run_at ASC, id ASC
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
 		)
-		UPDATE %s.embedding_tasks t
+		UPDATE %s.%s t
 		SET next_run_at = $3, updated_at = $1
 		WHERE t.id IN (SELECT id FROM picked)
 		RETURNING
 			t.id, t.entity_type, t.entity_id, t.model, t.reason, t.attempts, t.next_run_at, t.created_at, t.updated_at
-	`, r.schema, r.schema)
+	`, r.schema, embeddingTasksTable, r.schema, embeddingTasksTable)
 
 	rows, err := r.pool.Query(ctx, q, now, limit, next)
 	if err != nil {
@@ -96,7 +101,10 @@ func (r *Repo) Complete(ctx context.Context, id int64) error {
 	if id <= 0 {
 		return nil
 	}
-	q := fmt.Sprintf("DELETE FROM %s.embedding_tasks WHERE id = $1", r.schema)
+	if r.schema == "" {
+		return fmt.Errorf("schema is required")
+	}
+	q := fmt.Sprintf("DELETE FROM %s.%s WHERE id = $1", r.schema, embeddingTasksTable)
 	_, err := r.pool.Exec(ctx, q, id)
 	return err
 }
@@ -108,17 +116,20 @@ func (r *Repo) Fail(ctx context.Context, id int64, backoff time.Duration) error 
 	if backoff <= 0 {
 		backoff = 30 * time.Second
 	}
+	if r.schema == "" {
+		return fmt.Errorf("schema is required")
+	}
 	secs := int64(backoff / time.Second)
 	if secs < 1 {
 		secs = 1
 	}
 	q := fmt.Sprintf(`
-		UPDATE %s.embedding_tasks
+		UPDATE %s.%s
 		SET attempts = attempts + 1,
 		    next_run_at = now() + make_interval(secs => $1),
 		    updated_at = now()
 		WHERE id = $2
-	`, r.schema)
+	`, r.schema, embeddingTasksTable)
 	_, err := r.pool.Exec(ctx, q, secs, id)
 	return err
 }
