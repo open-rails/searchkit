@@ -5,7 +5,7 @@ import "time"
 type Task struct {
 	ID         int64
 	EntityType string
-	EntityID   int64
+	EntityID   string
 	Model      string
 	Reason     string
 	Attempts   int
@@ -13,4 +13,3 @@ type Task struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
-

@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,15 +14,18 @@ type Repo struct {
 	schema string
 }
 
-const embeddingTasksTable = "embeddingkit_embedding_tasks"
+const embeddingTasksTable = "embedding_tasks"
 
 func NewRepo(pool *pgxpool.Pool, schema string) *Repo {
 	return &Repo{pool: pool, schema: schema}
 }
 
-func (r *Repo) Enqueue(ctx context.Context, entityType string, entityID int64, model string, reason string) error {
+func (r *Repo) Enqueue(ctx context.Context, entityType string, entityID string, model string, reason string) error {
 	if entityType == "" || model == "" {
 		return fmt.Errorf("entityType and model are required")
+	}
+	if strings.TrimSpace(entityID) == "" {
+		return fmt.Errorf("entityID is required")
 	}
 	if r.schema == "" {
 		return fmt.Errorf("schema is required")

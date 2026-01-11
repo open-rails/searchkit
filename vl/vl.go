@@ -8,6 +8,7 @@ type AssetKind string
 const (
 	AssetKindImage AssetKind = "image"
 	AssetKindFrame AssetKind = "frame" // video frame
+	AssetKindVideo AssetKind = "video" // full video file (URL-only)
 )
 
 // AssetRef is an opaque handle returned by the host app's AssetLister.
@@ -19,39 +20,32 @@ type AssetRef struct {
 }
 
 // AssetLister returns the assets that should be embedded for an entity (gallery/video).
-type AssetLister func(ctx context.Context, entityType string, entityID int64) ([]AssetRef, error)
+type AssetLister func(ctx context.Context, entityType string, entityID string) ([]AssetRef, error)
 
 type AssetContent struct {
-	// URL is preferred when using hosted providers that can fetch the asset directly
-	// (e.g. presigned S3/MinIO URL).
+	// URL is required. embeddingkit's VL pipeline is URL-only: callers must
+	// provide presigned/public URLs that the provider can fetch directly.
 	URL string
-
-	// Bytes is the fallback when the provider can't fetch URLs and needs upload.
-	ContentType string
-	Bytes       []byte
 }
 
 // AssetFetcher resolves an AssetRef into either a URL (preferred) or bytes.
 // (Implementations may stream in practice; keep it simple for now.)
 type AssetFetcher func(ctx context.Context, ref AssetRef) (AssetContent, error)
 
-// Embedder generates vision-language embeddings for text+assets.
+type AssetURL struct {
+	Kind AssetKind
+	URL  string
+}
+
+// Embedder generates vision-language embeddings for text+assets (URL-only).
+//
+// The app supplies text + a list of URLs (images/frames and optionally a single
+// video URL) and the provider returns one fused vector.
 //
 // NOTE: Provider wiring for Qwen3-VL-Embedding is intentionally out of scope
 // here for now; embeddingkit defines the interface so apps can implement it.
 type Embedder interface {
 	Model() string
 	Dimensions() int
-	EmbedTextAndImages(ctx context.Context, text string, images []Image) ([]float32, error)
-}
-
-// URLEmbedder is an optional interface for providers that accept image URLs
-// directly (preferred, to avoid proxying bytes through the app).
-type URLEmbedder interface {
-	EmbedTextAndImageURLs(ctx context.Context, text string, urls []string) ([]float32, error)
-}
-
-type Image struct {
-	ContentType string
-	Bytes       []byte
+	EmbedTextAndAssetURLs(ctx context.Context, text string, assets []AssetURL) ([]float32, error)
 }

@@ -12,7 +12,7 @@ import (
 
 // DocumentBuilder builds a single canonical text document for an entity.
 // Embeddings are language-agnostic in storage and search.
-type DocumentBuilder func(ctx context.Context, entityType string, entityID int64) (string, error)
+type DocumentBuilder func(ctx context.Context, entityType string, entityID string) (string, error)
 
 // Storage is implemented by the host application and maps embeddingkit's generic
 // concepts to the app's concrete Postgres tables/indexes (typically halfvec(K)).
@@ -20,9 +20,9 @@ type DocumentBuilder func(ctx context.Context, entityType string, entityID int64
 // This exists because halfvec requires fixed dimensions, and apps may store
 // multiple models with different dims (e.g. 2560 vs 4096) in separate tables.
 type Storage interface {
-	UpsertTextEmbedding(ctx context.Context, entityType string, entityID int64, model string, dim int, embedding []float32) error
-	UpsertVLEmbeddingAsset(ctx context.Context, entityType string, entityID int64, model string, dim int, ref vl.AssetRef, embedding []float32) error
-	UpsertVLAggregateEmbedding(ctx context.Context, entityType string, entityID int64, model string, dim int, embedding []float32) error
+	UpsertTextEmbedding(ctx context.Context, entityType string, entityID string, model string, dim int, embedding []float32) error
+	UpsertVLEmbeddingAsset(ctx context.Context, entityType string, entityID string, model string, dim int, ref vl.AssetRef, embedding []float32) error
+	UpsertVLAggregateEmbedding(ctx context.Context, entityType string, entityID string, model string, dim int, embedding []float32) error
 }
 
 type Config struct {
@@ -120,18 +120,18 @@ func (r *Runtime) isVLModel(model string) bool {
 }
 
 // EnqueueTextEmbedding enqueues a text embedding task for an entity+model.
-func (r *Runtime) EnqueueTextEmbedding(ctx context.Context, entityType string, entityID int64, model string, reason string) error {
+func (r *Runtime) EnqueueTextEmbedding(ctx context.Context, entityType string, entityID string, model string, reason string) error {
 	return r.taskRepo.Enqueue(ctx, entityType, entityID, model, reason)
 }
 
 // EnqueueEmbedding enqueues an embedding task for an entity+model (text or VL).
-func (r *Runtime) EnqueueEmbedding(ctx context.Context, entityType string, entityID int64, model string, reason string) error {
+func (r *Runtime) EnqueueEmbedding(ctx context.Context, entityType string, entityID string, model string, reason string) error {
 	return r.taskRepo.Enqueue(ctx, entityType, entityID, model, reason)
 }
 
 // GenerateAndStoreTextEmbedding computes and upserts the embedding for an entity.
 // Intended to be called from a background worker.
-func (r *Runtime) GenerateAndStoreTextEmbedding(ctx context.Context, entityType string, entityID int64, model string) error {
+func (r *Runtime) GenerateAndStoreTextEmbedding(ctx context.Context, entityType string, entityID string, model string) error {
 	if !r.isTextModel(model) {
 		return fmt.Errorf("model %q is not configured for text embeddings", model)
 	}
@@ -146,13 +146,14 @@ func (r *Runtime) GenerateAndStoreTextEmbedding(ctx context.Context, entityType 
 	if err != nil {
 		return err
 	}
+	normalize.L2NormalizeInPlace(vec)
 	dim := len(vec)
 	return r.storage.UpsertTextEmbedding(ctx, entityType, entityID, model, dim, vec)
 }
 
 // GenerateAndStoreVLEmbedding computes VL embeddings for selected assets, stores
 // per-asset embeddings, and stores an aggregate embedding for fast search.
-func (r *Runtime) GenerateAndStoreVLEmbedding(ctx context.Context, entityType string, entityID int64, model string) error {
+func (r *Runtime) GenerateAndStoreVLEmbedding(ctx context.Context, entityType string, entityID string, model string) error {
 	if !r.isVLModel(model) {
 		return fmt.Errorf("model %q is not configured for vl embeddings", model)
 	}
@@ -179,57 +180,31 @@ func (r *Runtime) GenerateAndStoreVLEmbedding(ctx context.Context, entityType st
 		refs = refs[:r.cfg.MaxAssets]
 	}
 
-	var sum []float32
-	var n int
+	var assets []vl.AssetURL
 	for _, ref := range refs {
 		content, err := r.assetFetcher(ctx, ref)
 		if err != nil {
 			continue
 		}
-
-		var vec []float32
-		if urlEmbedder, ok := r.vlEmbedder.(vl.URLEmbedder); ok && content.URL != "" {
-			vec, err = urlEmbedder.EmbedTextAndImageURLs(ctx, doc, []string{content.URL})
-		} else if content.Bytes != nil {
-			vec, err = r.vlEmbedder.EmbedTextAndImages(ctx, doc, []vl.Image{{ContentType: content.ContentType, Bytes: content.Bytes}})
-		} else {
+		if content.URL == "" {
 			continue
 		}
-		if err != nil {
-			continue
-		}
-		normalize.L2NormalizeInPlace(vec)
-		dim := len(vec)
-		if err := r.storage.UpsertVLEmbeddingAsset(ctx, entityType, entityID, model, dim, ref, vec); err != nil {
-			continue
-		}
-		if sum == nil {
-			sum = make([]float32, dim)
-		}
-		if len(sum) != dim {
-			continue
-		}
-		for i := range vec {
-			sum[i] += vec[i]
-		}
-		n++
+		assets = append(assets, vl.AssetURL{Kind: ref.Kind, URL: content.URL})
 	}
-
-	if n == 0 || sum == nil {
+	if len(assets) == 0 {
 		return nil
 	}
 
-	avg := make([]float32, len(sum))
-	inv := float32(1.0) / float32(n)
-	for i := range sum {
-		avg[i] = sum[i] * inv
+	vec, err := r.vlEmbedder.EmbedTextAndAssetURLs(ctx, doc, assets)
+	if err != nil {
+		return err
 	}
-	normalize.L2NormalizeInPlace(avg)
-	return r.storage.UpsertVLAggregateEmbedding(ctx, entityType, entityID, model, len(avg), avg)
+	normalize.L2NormalizeInPlace(vec)
+	return r.storage.UpsertVLAggregateEmbedding(ctx, entityType, entityID, model, len(vec), vec)
 }
 
 // GenerateAndStoreEmbedding routes to text vs VL based on model configuration.
-func (r *Runtime) GenerateAndStoreEmbedding(ctx context.Context, entityType string, entityID int64, model string) error {
+func (r *Runtime) GenerateAndStoreEmbedding(ctx context.Context, entityType string, entityID string, model string) error {
 	if r.isVLModel(model) {
 		return r.GenerateAndStoreVLEmbedding(ctx, entityType, entityID, model)
 	}
