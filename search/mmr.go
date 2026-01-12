@@ -63,4 +63,3 @@ func MMRReRank(hits []Hit, k int, lambda float32, candidateSim func(a, b Hit) fl
 
 	return selected
 }
-

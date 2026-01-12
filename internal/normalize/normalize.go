@@ -21,4 +21,3 @@ func L2NormalizeInPlace(vec []float32) {
 		vec[i] *= invNorm
 	}
 }
-

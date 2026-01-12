@@ -11,31 +11,21 @@ const (
 	AssetKindVideo AssetKind = "video" // full video file (URL-only)
 )
 
-// AssetRef is an opaque handle returned by the host app's AssetLister.
-// It typically points to an object in S3/MinIO (bucket/key) or a DB row.
-type AssetRef struct {
-	Kind     AssetKind
-	Key      string
-	FrameIdx *int // optional: for video-derived frames
-}
-
-// AssetLister returns the assets that should be embedded for an entity (gallery/video).
-type AssetLister func(ctx context.Context, entityType string, entityID string) ([]AssetRef, error)
-
-type AssetContent struct {
-	// URL is required. embeddingkit's VL pipeline is URL-only: callers must
-	// provide presigned/public URLs that the provider can fetch directly.
-	URL string
-}
-
-// AssetFetcher resolves an AssetRef into either a URL (preferred) or bytes.
-// (Implementations may stream in practice; keep it simple for now.)
-type AssetFetcher func(ctx context.Context, ref AssetRef) (AssetContent, error)
-
 type AssetURL struct {
 	Kind AssetKind
 	URL  string
 }
+
+// ListAssetURLs returns the assets that should be embedded for each entity
+// (gallery/video) as presigned/public URLs.
+//
+// NOTE: embeddingkit's VL pipeline is URL-only: embeddingkit does not upload raw
+// bytes to providers.
+//
+// The returned map should contain entries only for entities that exist. Missing
+// IDs are treated as "entity not found" by the caller (and tasks may be
+// dropped).
+type ListAssetURLs func(ctx context.Context, entityType string, entityIDs []string) (map[string][]AssetURL, error)
 
 // Embedder generates vision-language embeddings for text+assets (URL-only).
 //

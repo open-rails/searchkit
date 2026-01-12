@@ -37,9 +37,11 @@ func NewOpenAICompatible(cfg OpenAICompatibleConfig) (*OpenAICompatibleEmbedder,
 	}
 	openaiCfg := openai.DefaultConfig(cfg.APIKey)
 	openaiCfg.BaseURL = cfg.BaseURL
-	if cfg.Timeout > 0 {
-		openaiCfg.HTTPClient = &http.Client{Timeout: cfg.Timeout}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
 	}
+	openaiCfg.HTTPClient = &http.Client{Timeout: timeout}
 	return &OpenAICompatibleEmbedder{
 		client:     openai.NewClientWithConfig(openaiCfg),
 		model:      cfg.Model,

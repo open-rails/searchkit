@@ -32,13 +32,6 @@ type Options struct {
 	// OversampleFactor controls how many candidates stage-1 pulls vs final limit.
 	// Only used when TwoStage=true. Defaults to 5.
 	OversampleFactor int
-
-	// ExtraWhereSQL is appended to WHERE (advanced escape hatch; must be SQL-safe).
-	// Example: "AND entity_type <> 'gallery'".
-	ExtraWhereSQL string
-
-	// ExtraArgs are appended to the query args after the standard args.
-	ExtraArgs []any
 }
 
 type Query struct {
@@ -123,12 +116,6 @@ func SearchVectors(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, err
 		where += fmt.Sprintf(" AND entity_id <> ALL($%d::text[])", argN)
 		args = append(args, opts.ExcludeIDs)
 		argN++
-	}
-	if strings.TrimSpace(opts.ExtraWhereSQL) != "" {
-		where += " " + strings.TrimSpace(opts.ExtraWhereSQL)
-		if len(opts.ExtraArgs) > 0 {
-			args = append(args, opts.ExtraArgs...)
-		}
 	}
 
 	if !opts.TwoStage {
@@ -249,12 +236,6 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		where += fmt.Sprintf(" AND ev.entity_id <> ALL($%d::text[])\n", argN)
 		args = append(args, opts.ExcludeIDs)
 		argN++
-	}
-	if strings.TrimSpace(opts.ExtraWhereSQL) != "" {
-		where += " " + strings.TrimSpace(opts.ExtraWhereSQL) + "\n"
-		if len(opts.ExtraArgs) > 0 {
-			args = append(args, opts.ExtraArgs...)
-		}
 	}
 
 	// NOTE: SimilarTo always runs 1-stage cosine KNN. Callers can run TwoStage by

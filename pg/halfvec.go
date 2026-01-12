@@ -28,4 +28,3 @@ func DistanceOrderExpr(column string, dim int) string {
 func QueryVector(vec []float32) pgvector.Vector {
 	return pgvector.NewVector(vec)
 }
-

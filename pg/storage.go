@@ -7,9 +7,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
-
-	"github.com/doujins-org/embeddingkit/runtime"
-	"github.com/doujins-org/embeddingkit/vl"
 )
 
 const embeddingVectorsTable = "embedding_vectors"
@@ -23,8 +20,6 @@ type PostgresStorage struct {
 	pool   *pgxpool.Pool
 	schema string
 }
-
-var _ runtime.Storage = (*PostgresStorage)(nil)
 
 func NewPostgresStorage(pool *pgxpool.Pool, schema string) *PostgresStorage {
 	return &PostgresStorage{pool: pool, schema: schema}
@@ -54,13 +49,4 @@ func (s *PostgresStorage) UpsertTextEmbedding(ctx context.Context, entityType st
 
 	_, err := s.pool.Exec(ctx, q, entityType, entityID, model, pgvector.NewHalfVector(embedding))
 	return err
-}
-
-func (s *PostgresStorage) UpsertVLEmbeddingAsset(ctx context.Context, entityType string, entityID string, model string, dim int, ref vl.AssetRef, embedding []float32) error {
-	return fmt.Errorf("vl embedding storage not implemented")
-}
-
-func (s *PostgresStorage) UpsertVLAggregateEmbedding(ctx context.Context, entityType string, entityID string, model string, dim int, embedding []float32) error {
-	// In v1, store VL embeddings in the same canonical table as text embeddings.
-	return s.UpsertTextEmbedding(ctx, entityType, entityID, model, dim, embedding)
 }

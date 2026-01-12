@@ -52,3 +52,34 @@ These are optional and should not be required for core usage:
 - `search.MMRReRank(...)` diversity helper (caller supplies candidate-to-candidate similarity).
 - `eval.RecallAtK(...)` and `eval.MRR(...)` metrics skeleton.
 
+## Dead-letter queue (DLQ)
+
+Non-retryable failures (or tasks that exceed max-attempts) are moved out of
+`embedding_tasks` into:
+
+- `embedding_dead_letters`
+
+This keeps `embedding_tasks` mostly empty in steady state.
+
+## Removing models (manual maintenance)
+
+embeddingkit is config-driven. If a model is removed from the host app config:
+
+- embeddingkit will stop enqueueing new tasks for it and stop using it for search
+  (because the host app won't call it anymore),
+- but embeddingkit will NOT automatically delete old embeddings or drop indexes.
+
+If you want to clean up a removed model, you can do it manually:
+
+- Delete stored vectors:
+
+  - `DELETE FROM <schema>.embedding_vectors WHERE model = '<model>';`
+
+- Drop per-model indexes created by `pg.EnsureModelIndexes`:
+
+  - Find them by name pattern:
+    - `idx_embedding_vectors_hnsw_cosine__*`
+    - `idx_embedding_vectors_hnsw_binary__*`
+
+  - Or query Postgres catalog to list matching indexes for your schema/table and
+    drop them explicitly.

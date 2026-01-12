@@ -10,8 +10,8 @@ import "fmt"
 // names, filters, and bind the query vector parameters in the right order.
 //
 // Expected bindings (in order):
-//  1) query halfvec vector (for stage-1 binary_quantize)
-//  2) query halfvec vector (for stage-2 rescoring)
+//  1. query halfvec vector (for stage-1 binary_quantize)
+//  2. query halfvec vector (for stage-2 rescoring)
 //
 // NOTE: this assumes pgvector functions/operators are available:
 // - binary_quantize(halfvec) returning bit(K)
@@ -44,4 +44,3 @@ LIMIT %d
 		limit,
 	)
 }
-

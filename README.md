@@ -52,8 +52,8 @@ For VL, the contract is URL-only (the host app provides presigned/public URLs).
 
 Host apps provide:
 
-- `runtime.DocumentBuilder`: `(entity_type, entity_id) -> text`
-- `vl.AssetLister`: `(entity_type, entity_id) -> []assets` (URLs are resolved by the host)
+- `runtime.BuildText`: `(entity_type, []entity_id) -> map[entity_id]text` (batch-first)
+- `vl.ListAssetURLs`: `(entity_type, []entity_id) -> map[entity_id][]assets` (URL-only; batch-first)
 
 ### 4) Enqueue work
 
@@ -68,10 +68,15 @@ Deduplication is by `(entity_type, entity_id, model)`.
 You can run workers with any job runner you want. A minimal loop is:
 
 - `tasks.Repo.FetchReady(...)`
-- `runtime.Runtime.GenerateAndStoreEmbedding(...)`
-- `tasks.Repo.Complete(...)` / `tasks.Repo.Fail(...)`
+- `runtime.Runtime.GenerateAndStoreEmbedding(...)` (or batch via `embedder.EmbedTexts(...)`)
+- `tasks.Repo.Complete(...)` / `tasks.Repo.Fail(...)` / `tasks.Repo.DeadLetter(...)`
 
-Example (non-River):
+Or use the optional helper:
+
+- `worker.Run(ctx, rt, repo, worker.Options{...})` / `worker.DrainOnce(...)`
+  - Provider calls are batched for text embeddings (25 texts per request).
+
+Example (non-River, using embeddingkit worker helper):
 
 ```go
 // package yourapp
@@ -82,6 +87,7 @@ import (
 
 	"github.com/doujins-org/embeddingkit/runtime"
 	"github.com/doujins-org/embeddingkit/tasks"
+	"github.com/doujins-org/embeddingkit/worker"
 )
 
 func RunEmbeddingWorker(ctx context.Context, rt *runtime.Runtime, repo *tasks.Repo) error {
@@ -93,17 +99,7 @@ func RunEmbeddingWorker(ctx context.Context, rt *runtime.Runtime, repo *tasks.Re
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			batch, err := repo.FetchReady(ctx, 250, 30*time.Second)
-			if err != nil {
-				return err
-			}
-			for _, task := range batch {
-				if err := rt.GenerateAndStoreEmbedding(ctx, task.EntityType, task.EntityID, task.Model); err != nil {
-					_ = repo.Fail(ctx, task.ID, 30*time.Second)
-					continue
-				}
-				_ = repo.Complete(ctx, task.ID)
-			}
+			_ = worker.DrainOnce(ctx, rt, repo, worker.Options{})
 		}
 	}
 }
@@ -119,3 +115,17 @@ embeddingkit can generate semantic candidates from stored vectors in
 
 These APIs return only `(entity_type, entity_id, model, similarity)`; the host
 app hydrates those IDs into domain rows and applies business rules.
+
+## Model registry + indexes (recommended)
+
+If you want embeddingkit to be configuration-driven (and to ensure per-model ANN
+indexes exist automatically), construct the runtime via:
+
+- `runtime.NewWithContext(ctx, runtime.Options{...})`
+
+This will upsert configured models into `<schema>.embedding_models` and create
+per-model cosine + binary HNSW indexes (using `CREATE INDEX CONCURRENTLY`).
+
+If you also provide `BackfillEntityTypes` + `ListEntityIDsPage` in
+`runtime.Options`, embeddingkit will start a background loop that enqueues
+`embedding_tasks` for model backfills in bounded batches.

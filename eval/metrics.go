@@ -57,4 +57,3 @@ func MRR(got []Key, expected []Key) float64 {
 	}
 	return 0.0
 }
-

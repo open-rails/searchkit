@@ -1,6 +1,16 @@
 {
   "issues": [
     {
+      "name": "Batch-First Host Callbacks + Worker Hydration",
+      "tasks": [
+        "[x] Replace `runtime.BuildTextBatch` with required `runtime.BuildText(ctx, entity_type, []entity_id) -> map[id]text`",
+        "[x] Replace `vl.ListAssetURLs` with required `vl.ListAssetURLs(ctx, entity_type, []entity_id) -> map[id][]assets`",
+        "[x] Update `runtime.Options` and `runtime.New/NewWithContext` to use batch-first callbacks",
+        "[x] Update `worker.DrainOnce` and `worker.Run` to hydrate per batch (not per task)",
+        "[x] Update `README.md` to reflect batch-first contract (250-friendly)"
+      ]
+    },
+    {
       "name": "Host-Schema Tables (River-style)",
       "tasks": [
         "[x] Rename task table to `embedding_tasks`",
@@ -24,7 +34,7 @@
       "name": "VL Embeddings (Hosted API; URL-only; Provider TBD)",
       "tasks": [
         "[x] Define canonical VL contract: URL-only, fused single-vector per entity/query (no per-asset vectors in v1)",
-        "[ ] Remove/avoid embeddingkit-level hard limits/knobs (no MaxAssets/MaxTextBytes/ChunkingStrategy config); host app decides asset selection + chunking; provider rejections are surfaced as errors",
+        "[x] Remove/avoid embeddingkit-level hard limits/knobs (no MaxAssets/MaxTextBytes/ChunkingStrategy config); host app decides asset selection + chunking; provider rejections are surfaced as errors",
         "[x] Extend `embeddingkit/vl` with a URL-only fused embed interface that accepts (text + N image/frame URLs and optionally a single video URL) and returns ONE vector",
         "[x] Enforce URL-only inputs end-to-end (no raw bytes uploads); AssetFetcher returns URLs only; Runtime requires URL-only VL embedder",
         "[x] Provide a fusion helper for chunk-level fusion (avg + L2 normalize) when inputs are chunked",
@@ -54,66 +64,87 @@
     {
       "name": "API Minimization",
       "tasks": [
-        "[ ] Keep host callback surface tiny: require only `ListEntityIDsPage`, `BuildText`, and `ListAssetURLs`",
-        "[ ] Remove/replace extra host callbacks currently present: `vl.AssetFetcher`, `runtime.Storage` (host should not implement storage; embeddingkit owns its Postgres tables), and any per-asset embedding storage APIs",
-        "[ ] Remove `UpsertVLEmbeddingAsset` and any per-asset VL embedding storage; store only ONE aggregate VL vector per `(entity_type, entity_id, model)`",
-        "[ ] Remove `runtime.Config.EnabledModels`/`Kind` checks from the hot path; model registry should be driven by config+db, not by embedder.Model() equality checks",
-        "[ ] Remove `runtime.Config.MaxAssets` (host app is responsible for selecting/chunking assets; embeddingkit does not enforce limits)",
-        "[ ] Remove or optionalize any other host callback interfaces (metadata/language/etc.) unless strictly required",
-        "[ ] Keep the public search API tiny: `SearchVectors` + `SimilarTo` returning only `(entity_type, entity_id, model?, similarity)`",
-        "[ ] Remove `search.Options.ExtraWhereSQL`/`ExtraArgs` escape hatches to avoid SQL-injection footguns",
-        "[ ] Audit remaining search options and remove anything non-essential",
-        "[ ] Keep `mmr`/`eval` helpers as optional subpackages (not required by runtime/search); document them as optional"
+        "[x] Keep host callback surface tiny: require only `ListEntityIDsPage`, `BuildText`, and `ListAssetURLs`",
+        "[x] Remove/replace extra host callbacks currently present: `vl.AssetFetcher`, `runtime.Storage` (host should not implement storage; embeddingkit owns its Postgres tables), and any per-asset embedding storage APIs",
+        "[x] Remove `UpsertVLEmbeddingAsset` and any per-asset VL embedding storage; store only ONE aggregate VL vector per `(entity_type, entity_id, model)`",
+        "[x] Remove `runtime.Config.EnabledModels`/`Kind` checks from the hot path; model registry should be driven by config+db, not by embedder.Model() equality checks",
+        "[x] Remove `runtime.Config.MaxAssets` (host app is responsible for selecting/chunking assets; embeddingkit does not enforce limits)",
+        "[x] Remove or optionalize any other host callback interfaces (metadata/language/etc.) unless strictly required",
+        "[x] Keep the public search API tiny: `SearchVectors` + `SimilarTo` returning only `(entity_type, entity_id, model?, similarity)`",
+        "[x] Remove `search.Options.ExtraWhereSQL`/`ExtraArgs` escape hatches to avoid SQL-injection footguns",
+        "[x] Audit remaining search options and remove anything non-essential",
+        "[x] Keep `mmr`/`eval` helpers as optional subpackages (not required by runtime/search); document them as optional"
       ]
     },
     {
       "name": "Worker Rate Limiting + Backoff",
       "tasks": [
-        "[ ] Add optional built-in worker runner helpers that enforce MaxConcurrentEmbeds and MaxRequestsPerSecond (token bucket) while draining `embedding_tasks`",
-        "[ ] Default behavior should be 'as fast as possible but safe' (sane default concurrency + optional/no-op rate limiter unless configured)",
-        "[ ] Add 429-aware exponential backoff: when provider returns rate limit errors, push `next_run_at` forward exponentially based on `attempts` (with min/max caps)",
-        "[ ] Ensure backoff applies per-task and does not require new columns (reuse `attempts` + `next_run_at`)",
-        "[ ] Add jitter to backoff scheduling to avoid thundering herds",
-        "[ ] Define retryable vs permanent error classification (network/429/5xx retry; invalid input and other permanent 4xx fail-fast)",
-        "[ ] Add a max-attempts policy (poison-pill cap) so tasks do not retry forever; document how hosts can override/handle dead tasks",
-        "[ ] Treat 'entity missing/deleted' from host callbacks as a terminal success (drop task) rather than an endless retry",
-        "[ ] Document recommended host usage: either use embeddingkit runner helper, or implement equivalent rate limiting in the host job system"
+        "[x] Add optional built-in worker runner helpers that enforce MaxConcurrentEmbeds and MaxRequestsPerSecond (token bucket) while draining `embedding_tasks`",
+        "[x] Default behavior should be 'as fast as possible but safe' (sane default concurrency + optional/no-op rate limiter unless configured)",
+        "[x] Add 429-aware exponential backoff: when provider returns rate limit errors, push `next_run_at` forward exponentially based on `attempts` (with min/max caps)",
+        "[x] Ensure backoff applies per-task and does not require new columns (reuse `attempts` + `next_run_at`)",
+        "[x] Add jitter to backoff scheduling to avoid thundering herds",
+        "[x] Define retryable vs permanent error classification (network/429/5xx retry; invalid input and other permanent 4xx fail-fast)",
+        "[x] Add a max-attempts policy (poison-pill cap) so tasks do not retry forever; document how hosts can override/handle dead tasks",
+        "[x] Treat 'entity missing/deleted' from host callbacks as a terminal success (drop task) rather than an endless retry",
+        "[x] Add a lease token/lock-expiration check: return a locked_until (or reuse next_run_at lease) from `FetchReady`, and make `Complete/Fail` conditional so late workers can’t stomp new leases",
+        "[x] Add `started_at` (optional) for observability of stuck tasks (no behavior change)",
+        "[x] Ensure provider/client timeouts have mandatory sane defaults (per-request timeout + respect ctx deadline) so workers can’t hang indefinitely",
+        "[x] Document recommended host usage: either use embeddingkit runner helper, or implement equivalent rate limiting in the host job system"
+      ]
+    },
+    {
+      "name": "Dead Letter Queue (Non-Retryable Failures)",
+      "tasks": [
+        "[x] Add `embedding_dead_letters` table in embeddingkit migrations (composite identity, error text, attempts, reason, failed_at, created_at)",
+        "[x] Update worker helper to move tasks into `embedding_dead_letters` and delete from `embedding_tasks` when failures are permanent or max-attempts exceeded",
+        "[x] Keep `runtime.ErrEntityNotFound` behavior as 'terminal success' (delete task, no DLQ)",
+        "[x] Document operational workflow: inspect DLQ, optionally re-enqueue by copying back into `embedding_tasks` after fixing root cause"
       ]
     },
     {
       "name": "Task Queue Simplification",
       "tasks": [
-        "[ ] Keep `embedding_tasks` minimal: do not add `priority` or arbitrary future `scheduled_at/run_at` fields; keep `next_run_at` only as an internal retry/backoff timestamp",
-        "[ ] Ensure dedupe is handled by the UNIQUE key `(entity_type, entity_id, model)` + UPSERT (no `dedupe_key/unique_key`, and no deterministic task IDs required)",
-        "[ ] Remove any mention of `dedupe_key/unique_key` from embeddingkit docs and APIs (and do not add such a column to the schema)",
-        "[ ] Drop surrogate `id` columns where not needed: make `embedding_vectors` use `PRIMARY KEY (entity_type, entity_id, model)` and remove `id bigserial` + redundant unique index",
-        "[ ] Drop surrogate `id` on `embedding_tasks` too: make `PRIMARY KEY (entity_type, entity_id, model)` and keep `next_run_at` + a ready index on `(next_run_at, entity_type, entity_id, model)`",
-        "[ ] Update README docs to reflect the minimal task/vector schema and clarify what `next_run_at` is used for"
+        "[x] Keep `embedding_tasks` minimal: do not add `priority` or arbitrary future `scheduled_at/run_at` fields; keep `next_run_at` only as an internal retry/backoff timestamp",
+        "[x] Ensure dedupe is handled by the UNIQUE key `(entity_type, entity_id, model)` + UPSERT (no `dedupe_key/unique_key`, and no deterministic task IDs required)",
+        "[x] Remove any mention of `dedupe_key/unique_key` from embeddingkit docs and APIs (and do not add such a column to the schema)",
+        "[x] Drop surrogate `id` columns where not needed: make `embedding_vectors` use `PRIMARY KEY (entity_type, entity_id, model)` and remove `id bigserial` + redundant unique index",
+        "[x] Drop surrogate `id` on `embedding_tasks`: use `PRIMARY KEY (entity_type, entity_id, model)` (no bigint IDs) and keep `next_run_at` + a ready index on `(next_run_at, entity_type, entity_id, model)`",
+        "[x] Update README docs to reflect the minimal task/vector schema and clarify what `next_run_at` is used for"
       ]
     },
     {
       "name": "Per-Model Binary Indexes (2-Stage Search Ready)",
       "tasks": [
-        "[ ] Decide the binary quantization bit-width strategy per model (K derived from model embedding dimension)",
-        "[ ] Add `embedding_models` registry table (model PK, dims, modality, created_at/updated_at) via embeddingkit Postgres migration",
-        "[ ] Add a runtime helper to upsert enabled models from host config into `embedding_models` (idempotent)",
-        "[ ] Ensure the model registry includes fixed `dims` for every supported model (text + VL)",
-        "[ ] Ensure indexes exist per enabled model (idempotent): per-model partial cosine HNSW and per-model partial binary HNSW over `binary_quantize(embedding::halfvec(dims))` (where model='<model>' and embedding is not null); binary indexing is always enabled (no config flag)",
-        "[ ] Add an embeddingkit Postgres migration that creates per-model binary HNSW indexes for a known set of models (optional; default path is runtime ensure-indexes)",
-        "[ ] Ensure the migration is safe to re-run (`CREATE INDEX IF NOT EXISTS`) and avoids long locks (prefer `CONCURRENTLY` if migratekit supports it; otherwise document expectations)",
-        "[ ] Remove the global mixed-dim ANN index (`idx_embedding_vectors_hnsw_cosine`) and replace it with per-model partial cosine HNSW indexes once model registry + ensure-indexes exists",
-        "[ ] Document policy for removed models: removing from config stops new tasks/search usage; embeddingkit does not auto-drop old indexes/data",
-        "[ ] Add an optional manual maintenance path for removed models: how to drop per-model indexes and delete model rows/embeddings safely (exposed as documented SQL snippets or a helper function, but not automatic)"
+        "[x] Decide the binary quantization bit-width strategy per model (K derived from model embedding dimension)",
+        "[x] Add `embedding_models` registry table (model PK, dims, modality, created_at/updated_at) via embeddingkit Postgres migration",
+        "[x] Add a runtime helper to upsert enabled models from host config into `embedding_models` (idempotent)",
+        "[x] Ensure the model registry includes fixed `dims` for every supported model (text + VL)",
+        "[x] Ensure indexes exist per enabled model (idempotent): per-model partial cosine HNSW and per-model partial binary HNSW over `binary_quantize(embedding::halfvec(dims))` (where model='<model>' and embedding is not null); binary indexing is always enabled (no config flag)",
+        "[x] Skip a migration-based index creator: embeddingkit creates per-model indexes at runtime via `CREATE INDEX CONCURRENTLY IF NOT EXISTS`",
+        "[x] Ensure index creation is safe to re-run and avoids long locks by using `CREATE INDEX CONCURRENTLY IF NOT EXISTS`",
+        "[x] Remove the global mixed-dim ANN index (`idx_embedding_vectors_hnsw_cosine`) and replace it with per-model partial cosine HNSW indexes once model registry + ensure-indexes exists",
+        "[x] Document policy for removed models: removing from config stops new tasks/search usage; embeddingkit does not auto-drop old indexes/data",
+        "[x] Add an optional manual maintenance path for removed models: how to drop per-model indexes and delete model rows/embeddings safely (documented in agents/NOTES.md)"
       ]
     },
     {
       "name": "Model Backfill (Config-Driven; Paginated ListEntities)",
       "tasks": [
-        "[ ] Define a host callback interface for listing entity IDs with pagination (opaque cursor + limit, stable ordering required)",
-        "[ ] Add `embedding_backfill_state` operational table (PK: model + entity_type; cursor/state/error/updated_at) via embeddingkit Postgres migration",
-        "[ ] Implement a backfill runner that (a) detects newly-enabled models, (b) pages entity IDs, (c) enqueues `embedding_tasks` idempotently, and (d) checkpoints cursor in `embedding_backfill_state`",
-        "[ ] Use sensible built-in defaults for backfill batching (page size, max tasks per run, max runtime) so host config does not need to specify them (allow optional overrides)",
-        "[ ] Ensure embeddingkit startup can be fully config-driven: on initialization, it upserts models, ensures required indexes exist, and kicks off/resumes backfills for newly-enabled models (no manual CLI steps required)"
+        "[x] Define a host callback interface for listing entity IDs with pagination (opaque cursor + limit, stable ordering required)",
+        "[x] Add `embedding_backfill_state` operational table (PK: model + entity_type; cursor/state/error/updated_at) via embeddingkit Postgres migration",
+        "[x] Implement a backfill runner that (a) detects newly-enabled models, (b) pages entity IDs, (c) enqueues `embedding_tasks` idempotently, and (d) checkpoints cursor in `embedding_backfill_state`",
+        "[x] Use sensible built-in defaults for backfill batching (page size, max tasks per run, max runtime) so host config does not need to specify them (allow optional overrides)",
+        "[x] Ensure embeddingkit startup can be fully config-driven: on initialization, it upserts models, ensures required indexes exist, and kicks off/resumes backfills for newly-enabled models (no manual CLI steps required)"
+      ]
+    },
+    {
+      "name": "Provider Request Batching (Text)",
+      "tasks": [
+        "[x] Add runtime batch helper to embed many documents in one provider call and upsert per item",
+        "[x] Update worker to batch provider embed calls at 25 texts/request (still 250 tasks fetched per batch)",
+        "[x] Ensure rate limiting and concurrency apply per provider request (chunk), not per task",
+        "[x] Update README.md to document provider batching behavior"
       ]
     }
   ]

@@ -28,4 +28,3 @@ func FuseAverageL2(vectors [][]float32) []float32 {
 	normalize.L2NormalizeInPlace(sum)
 	return sum
 }
-
