@@ -45,6 +45,19 @@ Planned contract:
 These return only IDs + similarity. Host apps hydrate IDs into domain rows and
 apply business rules.
 
+### App-owned filtering inside KNN
+
+Some apps need constraints that must be enforced inside the KNN query (not
+post-filtered), e.g. language availability.
+
+embeddingkit supports this via:
+
+- `search.Options.FilterSQL`
+- `search.Options.FilterArgs` (named args referenced as `@name`)
+
+This fragment is appended as `AND (<FilterSQL>)`. It is trusted SQL owned by the
+host app.
+
 ## Optional helpers
 
 These are optional and should not be required for core usage:

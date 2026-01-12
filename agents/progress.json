@@ -54,7 +54,8 @@
         "[x] Remove River adapter from embeddingkit (job-system agnostic)",
         "[x] Add canonical vector-search API over `embedding_vectors` (SearchVectors / SimilarTo)",
         "[x] Support 1-stage cosine KNN and optional 2-stage (binary_quantize oversample + halfvec rescore) in that API",
-        "[x] Add query options: entity_types filter, min_similarity, oversample_factor, limit, exclude_ids, and optional extra WHERE fragment + args",
+        "[x] Add query options: entity_types filter, min_similarity, oversample_factor, limit, exclude_ids",
+        "[x] Add app-owned KNN filter hook (`search.Options.FilterSQL` + `FilterArgs`) to support constraints like language availability inside SQL",
         "[x] Return only candidates (entity_type, entity_id, model, similarity) — no hydration/business logic",
         "[x] Document non-River runner loop contract (FetchReady → Work → Complete/Fail)",
         "[x] Add post-processing helpers (MMR / generic diversity caps) without domain assumptions",
@@ -71,7 +72,7 @@
         "[x] Remove `runtime.Config.MaxAssets` (host app is responsible for selecting/chunking assets; embeddingkit does not enforce limits)",
         "[x] Remove or optionalize any other host callback interfaces (metadata/language/etc.) unless strictly required",
         "[x] Keep the public search API tiny: `SearchVectors` + `SimilarTo` returning only `(entity_type, entity_id, model?, similarity)`",
-        "[x] Remove `search.Options.ExtraWhereSQL`/`ExtraArgs` escape hatches to avoid SQL-injection footguns",
+        "[x] Replace `search.Options.ExtraWhereSQL`/`ExtraArgs` with explicit `search.Options.FilterSQL` + named `FilterArgs` (trusted host SQL) to support app-owned constraints without positional-placeholder footguns",
         "[x] Audit remaining search options and remove anything non-essential",
         "[x] Keep `mmr`/`eval` helpers as optional subpackages (not required by runtime/search); document them as optional"
       ]

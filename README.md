@@ -116,6 +116,22 @@ embeddingkit can generate semantic candidates from stored vectors in
 These APIs return only `(entity_type, entity_id, model, similarity)`; the host
 app hydrates those IDs into domain rows and applies business rules.
 
+#### App-owned filtering inside KNN (e.g. language availability)
+
+If the host app needs to enforce additional constraints *inside* the vector
+query (for example, “only return galleries that have a translation row for the
+requested language”), pass an additional WHERE fragment via:
+
+- `search.Options.FilterSQL`
+- `search.Options.FilterArgs` (named args referenced as `@name`)
+
+This fragment is appended as:
+
+`... AND (<FilterSQL>)`
+
+`FilterSQL` is **trusted SQL owned by the host app**. Do not interpolate user
+input into it unsafely.
+
 ## Model registry + indexes (recommended)
 
 If you want embeddingkit to be configuration-driven (and to ensure per-model ANN

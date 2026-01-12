@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
 )
@@ -32,6 +33,19 @@ type Options struct {
 	// OversampleFactor controls how many candidates stage-1 pulls vs final limit.
 	// Only used when TwoStage=true. Defaults to 5.
 	OversampleFactor int
+
+	// FilterSQL is an optional additional WHERE fragment appended to the query as:
+	//   ... AND (<FilterSQL>)
+	//
+	// It is intended for app-owned constraints (e.g. language availability) that
+	// must be enforced inside the KNN query.
+	//
+	// IMPORTANT: this is trusted SQL provided by the host app. Do not insert
+	// user input into it unsafely.
+	FilterSQL string
+	// FilterArgs are named args referenced by FilterSQL using pgx '@name'
+	// placeholders (e.g. "... language = @lang").
+	FilterArgs map[string]any
 }
 
 type Query struct {
@@ -55,6 +69,23 @@ func quoteIdent(ident string) (string, error) {
 		return "", fmt.Errorf("invalid identifier %q", ident)
 	}
 	return `"` + ident + `"`, nil
+}
+
+func mergeNamedArgs(dst pgx.NamedArgs, extra map[string]any) error {
+	if len(extra) == 0 {
+		return nil
+	}
+	for k, v := range extra {
+		k = strings.TrimSpace(k)
+		if k == "" {
+			return fmt.Errorf("empty FilterArgs key")
+		}
+		if _, exists := dst[k]; exists {
+			return fmt.Errorf("FilterArgs key %q conflicts with reserved arg", k)
+		}
+		dst[k] = v
+	}
+	return nil
 }
 
 // SearchVectors runs a semantic KNN search against the embeddingkit-owned
@@ -100,22 +131,24 @@ func SearchVectors(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, err
 	vec := pgvector.NewHalfVector(q.QueryVec)
 
 	var sql string
-	var args []any
+	args := pgx.NamedArgs{}
 
 	// Common WHERE filters.
-	where := "WHERE model = $1 AND embedding IS NOT NULL"
-	args = append(args, q.Model)
-
-	argN := 2
+	where := "WHERE ev.model = @model AND ev.embedding IS NOT NULL"
+	args["model"] = q.Model
 	if len(opts.EntityTypes) > 0 {
-		where += fmt.Sprintf(" AND entity_type = ANY($%d::text[])", argN)
-		args = append(args, opts.EntityTypes)
-		argN++
+		where += " AND ev.entity_type = ANY(@entity_types::text[])"
+		args["entity_types"] = opts.EntityTypes
 	}
 	if len(opts.ExcludeIDs) > 0 {
-		where += fmt.Sprintf(" AND entity_id <> ALL($%d::text[])", argN)
-		args = append(args, opts.ExcludeIDs)
-		argN++
+		where += " AND ev.entity_id <> ALL(@exclude_ids::text[])"
+		args["exclude_ids"] = opts.ExcludeIDs
+	}
+	if strings.TrimSpace(opts.FilterSQL) != "" {
+		where += " AND (" + opts.FilterSQL + ")"
+		if err := mergeNamedArgs(args, opts.FilterArgs); err != nil {
+			return nil, err
+		}
 	}
 
 	if !opts.TwoStage {
@@ -124,17 +157,18 @@ func SearchVectors(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, err
 		// order by cosine_distance
 		sql = fmt.Sprintf(`
 			SELECT
-				entity_type,
-				entity_id,
-				model,
-				(1 - (embedding::%s <=> ($%d::%s)))::float4 AS similarity
-			FROM %s
+				ev.entity_type,
+				ev.entity_id,
+				ev.model,
+				(1 - (ev.embedding::%s <=> (@qvec::%s)))::float4 AS similarity
+			FROM %s ev
 			%s
-			ORDER BY embedding::%s <=> ($%d::%s)
-			LIMIT $%d
-		`, half, argN, half, table, where, half, argN, half, argN+1)
+			ORDER BY ev.embedding::%s <=> (@qvec::%s)
+			LIMIT @limit
+		`, half, half, table, where, half, half)
 
-		args = append(args, vec, q.Limit)
+		args["qvec"] = vec
+		args["limit"] = q.Limit
 	} else {
 		oversample := q.Limit * opts.OversampleFactor
 
@@ -142,38 +176,35 @@ func SearchVectors(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, err
 		//  - stage 1: approx retrieval using binary quantize (Hamming distance)
 		//  - stage 2: rescore by cosine distance
 		sql = fmt.Sprintf(`
-			WITH candidates AS (
+				WITH candidates AS (
+					SELECT
+						ev.entity_type,
+						ev.entity_id,
+						ev.model,
+						ev.embedding
+					FROM %s ev
+					%s
+					ORDER BY (binary_quantize(embedding::%s)::bit(%d)) <~> (binary_quantize(@qvec::%s)::bit(%d))
+					LIMIT @oversample
+				)
 				SELECT
 					entity_type,
 					entity_id,
 					model,
-					embedding
-				FROM %s
-				%s
-				ORDER BY (binary_quantize(embedding::%s)::bit(%d)) <~> (binary_quantize($%d::%s)::bit(%d))
-				LIMIT $%d
-			)
-			SELECT
-				entity_type,
-				entity_id,
-				model,
-				(1 - (embedding::%s <=> ($%d::%s)))::float4 AS similarity
-			FROM candidates
-			WHERE (1 - (embedding::%s <=> ($%d::%s))) >= $%d
-			ORDER BY embedding::%s <=> ($%d::%s)
-			LIMIT $%d
-		`, table, where, half, dim, argN, half, dim, argN+1, half, argN+2, half, half, argN+2, half, argN+3, half, argN+2, half, argN+4)
+					(1 - (embedding::%s <=> (@qvec::%s)))::float4 AS similarity
+				FROM candidates
+				WHERE (1 - (embedding::%s <=> (@qvec::%s))) >= @min_similarity
+				ORDER BY embedding::%s <=> (@qvec::%s)
+				LIMIT @limit
+			`, table, where, half, dim, half, dim, half, half, half, half, half, half)
 
-		args = append(args,
-			vec,        // $argN
-			oversample, // $argN+1
-			vec,        // $argN+2
-			opts.MinSimilarity,
-			q.Limit,
-		)
+		args["qvec"] = vec
+		args["oversample"] = oversample
+		args["min_similarity"] = opts.MinSimilarity
+		args["limit"] = q.Limit
 	}
 
-	rows, err := pool.Query(ctx, sql, args...)
+	rows, err := pool.Query(ctx, sql, args)
 	if err != nil {
 		return nil, err
 	}
@@ -220,22 +251,30 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 	table := quotedSchema + ".embedding_vectors"
 
 	where := `
-		WHERE ev.model = $3
+		WHERE ev.model = @model
 		  AND ev.embedding IS NOT NULL
-		  AND NOT (ev.entity_type = $1 AND ev.entity_id = $2)
+		  AND NOT (ev.entity_type = @entity_type AND ev.entity_id = @entity_id)
 	`
-	args := []any{entityType, entityID, model, limit}
+	args := pgx.NamedArgs{
+		"entity_type": entityType,
+		"entity_id":   entityID,
+		"model":       model,
+		"limit":       limit,
+	}
 
-	argN := 5
 	if len(opts.EntityTypes) > 0 {
-		where += fmt.Sprintf(" AND ev.entity_type = ANY($%d::text[])\n", argN)
-		args = append(args, opts.EntityTypes)
-		argN++
+		where += " AND ev.entity_type = ANY(@entity_types::text[])\n"
+		args["entity_types"] = opts.EntityTypes
 	}
 	if len(opts.ExcludeIDs) > 0 {
-		where += fmt.Sprintf(" AND ev.entity_id <> ALL($%d::text[])\n", argN)
-		args = append(args, opts.ExcludeIDs)
-		argN++
+		where += " AND ev.entity_id <> ALL(@exclude_ids::text[])\n"
+		args["exclude_ids"] = opts.ExcludeIDs
+	}
+	if strings.TrimSpace(opts.FilterSQL) != "" {
+		where += " AND (" + opts.FilterSQL + ")\n"
+		if err := mergeNamedArgs(args, opts.FilterArgs); err != nil {
+			return nil, err
+		}
 	}
 
 	// NOTE: SimilarTo always runs 1-stage cosine KNN. Callers can run TwoStage by
@@ -244,7 +283,7 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		WITH source AS (
 			SELECT embedding
 			FROM %s
-			WHERE entity_type = $1 AND entity_id = $2 AND model = $3 AND embedding IS NOT NULL
+			WHERE entity_type = @entity_type AND entity_id = @entity_id AND model = @model AND embedding IS NOT NULL
 			LIMIT 1
 		)
 		SELECT
@@ -255,10 +294,10 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		FROM %s ev, source s
 		%s
 		ORDER BY ev.embedding <=> s.embedding
-		LIMIT $4
+		LIMIT @limit
 	`, table, table, where)
 
-	rows, err := pool.Query(ctx, sql, args...)
+	rows, err := pool.Query(ctx, sql, args)
 	if err != nil {
 		return nil, err
 	}
