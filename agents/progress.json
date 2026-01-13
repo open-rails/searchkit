@@ -10,6 +10,19 @@
       ]
     },
     {
+      "name": "Add BM25/FTS Lexical Search",
+      "tasks": [
+        "[x] Extend `search_documents` to store both raw lexical text (for FTS) and heavy-normalized text (for trigram) without changing the host callback interface",
+        "[x] Add per-language `tsvector` column(s) and GIN index(es) for FTS",
+        "[x] Implement `search.FTSSearch(...)` (plainto_tsquery/websearch_to_tsquery + ts_rank_cd) returning hits with scores",
+        "[x] Ensure FTS is language-aware via regconfig (e.g. english/spanish/etc.) and document how language maps to regconfig",
+        "[x] Add tests for FTS ranking + basic correctness on a small fixture set",
+        "[x] Implement Reciprocal Rank Fusion (RRF) helper for merging FTS ranks + vector ranks (replace weighted-sum for regular search blending)",
+        "[x] Add public `searchkit.Typeahead(...)` API (trigram-only) and `searchkit.Search(...)` API (FTS+vector via RRF) as the recommended entrypoints",
+        "[x] Document recommended usage: typeahead=trigram, search=FTS+vector via RRF (no raw score mixing)"
+      ]
+    },
+    {
       "name": "Single Worker Loop",
       "tasks": [
         "[x] `worker.RunOnceSearchkit(...)` entrypoint",

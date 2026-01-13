@@ -2,7 +2,8 @@
 
 `searchkit` is a Go library for:
 
-- **Lexical search** (language-specific) via Postgres `pg_trgm` and a shared `search_documents` table.
+- **Typeahead / fuzzy lexical search** (language-specific) via Postgres `pg_trgm` over `search_documents.document`.
+- **Keyword lexical search** (BM25-family; language-specific) via Postgres full-text search over `search_documents.tsv`.
 - **Semantic search** (language-specific embeddings) via pgvector `halfvec` stored in `embedding_vectors`.
 - A **single, host-run worker loop** that:
   - consumes `search_dirty` notifications (changed/deleted entities),
@@ -53,7 +54,7 @@ Host apps provide:
 - `runtime.BuildSemanticDocument(ctx, entity_type, language, []entity_id) -> map[id]string` (**required**)
   - Used to generate embeddings.
 - `runtime.BuildLexicalString(ctx, entity_type, language, []entity_id) -> map[id]string` (required if you want lexical docs)
-  - Used to populate `search_documents` for trigram search.
+  - Used to populate `search_documents` for both trigram typeahead and FTS.
 - `vl.ListAssetURLs(ctx, entity_type, []entity_id) -> map[id][]AssetURL` (required only if VL models are enabled)
 
 ### 4) Mark changes (host writes `search_dirty`)
@@ -79,9 +80,20 @@ This single entrypoint:
 
 ### 6) Query candidates (lexical + semantic)
 
-Lexical (typeahead / sharp keyword search):
+Recommended entrypoints:
+
+- Typeahead (trigram-only): `searchkit.Typeahead(...)`
+- Search (FTS + vector fused by RRF): `searchkit.Search(...)`
+
+Lower-level building blocks (if you need direct control):
+
+Lexical (typeahead / typos / substring):
 
 - `search.LexicalSearch(ctx, pool, query, search.LexicalOptions{Schema, Language, EntityTypes, Limit, MinSimilarity})`
+
+Lexical (keyword search; BM25-family):
+
+- `search.FTSSearch(ctx, pool, query, search.FTSOptions{Schema, Language, EntityTypes, Limit})`
 
 Semantic (candidate generation; host hydrates IDs + applies business logic):
 
@@ -89,6 +101,14 @@ Semantic (candidate generation; host hydrates IDs + applies business logic):
 - Similar-to-item: `search.SimilarTo(ctx, pool, schema, entityType, entityID, model, language, limit, opts)`
 
 These APIs return only IDs + scores; the host app hydrates those IDs into DTOs and blends results as desired.
+
+## Language → Postgres FTS config mapping
+
+FTS uses a schema-local function created by migrations:
+
+- `<schema>.searchkit_regconfig_for_language(language)`
+
+It maps common codes like `en/es/fr/de/...` to built-in configs and falls back to `simple`.
 
 ## Model registry + ANN indexes
 

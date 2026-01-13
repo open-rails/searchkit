@@ -4,4 +4,3 @@ package pg
 func QuoteSchema(schema string) (string, error) {
 	return quoteIdent(schema)
 }
-

@@ -53,31 +53,50 @@ func UpsertSearchDocuments(ctx context.Context, pool *pgxpool.Pool, schema strin
 
 	idArr := make([]string, 0, len(ids))
 	docArr := make([]string, 0, len(ids))
+	rawArr := make([]string, 0, len(ids))
 	var deleteIDs []string
 	for _, id := range ids {
 		raw := docs[id]
-		norm := strings.TrimSpace(textnormalize.Heavy(raw))
+		rawTrim := strings.TrimSpace(raw)
+		norm := strings.TrimSpace(textnormalize.Heavy(rawTrim))
 		if norm == "" {
 			deleteIDs = append(deleteIDs, id)
 			continue
 		}
 		idArr = append(idArr, id)
 		docArr = append(docArr, norm)
+		if rawTrim == "" {
+			rawTrim = norm
+		}
+		rawArr = append(rawArr, rawTrim)
 	}
 
 	if len(idArr) > 0 {
 		q := fmt.Sprintf(`
 			WITH rows AS (
-				SELECT unnest($3::text[]) AS entity_id, unnest($4::text[]) AS document
+				SELECT
+					unnest($3::text[]) AS entity_id,
+					unnest($4::text[]) AS raw_document,
+					unnest($5::text[]) AS document
 			)
-			INSERT INTO %s.%s (entity_type, entity_id, language, document, created_at, updated_at)
-			SELECT $1, rows.entity_id, $2, rows.document, now(), now()
+			INSERT INTO %s.%s (entity_type, entity_id, language, raw_document, document, tsv, created_at, updated_at)
+			SELECT
+				$1,
+				rows.entity_id,
+				$2,
+				rows.raw_document,
+				rows.document,
+				to_tsvector(%s.searchkit_regconfig_for_language($2), rows.raw_document),
+				now(),
+				now()
 			FROM rows
 			ON CONFLICT (entity_type, entity_id, language) DO UPDATE SET
+				raw_document = EXCLUDED.raw_document,
 				document = EXCLUDED.document,
+				tsv = EXCLUDED.tsv,
 				updated_at = now()
-		`, qs, searchDocumentsTable)
-		if _, err := pool.Exec(ctx, q, entityType, language, idArr, docArr); err != nil {
+		`, qs, searchDocumentsTable, qs)
+		if _, err := pool.Exec(ctx, q, entityType, language, idArr, rawArr, docArr); err != nil {
 			return err
 		}
 	}
@@ -126,4 +145,3 @@ func DeleteSearchDocumentsMany(ctx context.Context, pool *pgxpool.Pool, schema s
 	_, err = pool.Exec(ctx, q, entityType, language, entityIDs)
 	return err
 }
-

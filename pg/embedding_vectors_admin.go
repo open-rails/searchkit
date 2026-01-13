@@ -80,4 +80,3 @@ func FilterMissingEmbeddings(ctx context.Context, pool *pgxpool.Pool, schema str
 	}
 	return out, rows.Err()
 }
-
