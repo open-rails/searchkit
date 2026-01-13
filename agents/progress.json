@@ -1,0 +1,30 @@
+{
+  "issues": [
+    {
+      "name": "Searchkit Core (Lexical + Semantic)",
+      "tasks": [
+        "[x] Postgres migrations for `search_documents`, `search_dirty`, embedding tables",
+        "[x] Language-specific lexical docs (pg_trgm + heavy normalization)",
+        "[x] Language-specific embeddings (halfvec + semantic search helpers)",
+        "[x] Active model registry (`embedding_models`) synced from config"
+      ]
+    },
+    {
+      "name": "Single Worker Loop",
+      "tasks": [
+        "[x] `worker.RunOnceSearchkit(...)` entrypoint",
+        "[x] Process `search_dirty` (upsert docs, enqueue embeddings, delete artifacts on delete)",
+        "[x] Cursor-based backfill (`search_documents_backfill_state`, `embedding_vectors_backfill_state`)",
+        "[x] Drain `embedding_tasks` and write `embedding_vectors`",
+        "[x] Dead-letter terminal failures into `embedding_dead_letters`"
+      ]
+    },
+    {
+      "name": "Docs + Naming",
+      "tasks": [
+        "[x] Update `README.md` to be a host-facing manual",
+        "[x] Remove remaining \"embeddingkit\" naming in code/comments"
+      ]
+    }
+  ]
+}

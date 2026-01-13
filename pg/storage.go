@@ -1,0 +1,55 @@
+package pg
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	pgvector "github.com/pgvector/pgvector-go"
+)
+
+const embeddingVectorsTable = "embedding_vectors"
+
+// PostgresStorage is a reference implementation of runtime.Storage that writes
+// embeddings into searchkit-owned tables in the host application's schema.
+//
+// Tables:
+//   - <schema>.embedding_vectors
+type PostgresStorage struct {
+	pool   *pgxpool.Pool
+	schema string
+}
+
+func NewPostgresStorage(pool *pgxpool.Pool, schema string) *PostgresStorage {
+	return &PostgresStorage{pool: pool, schema: schema}
+}
+
+func (s *PostgresStorage) UpsertTextEmbedding(ctx context.Context, entityType string, entityID string, model string, language string, dim int, embedding []float32) error {
+	if s.schema == "" {
+		return fmt.Errorf("schema is required")
+	}
+	if entityType == "" || model == "" {
+		return fmt.Errorf("entityType and model are required")
+	}
+	if strings.TrimSpace(language) == "" {
+		return fmt.Errorf("language is required")
+	}
+	if strings.TrimSpace(entityID) == "" {
+		return fmt.Errorf("entityID is required")
+	}
+	if len(embedding) == 0 {
+		return fmt.Errorf("embedding is empty")
+	}
+
+	q := fmt.Sprintf(`
+		INSERT INTO %s.%s (entity_type, entity_id, model, language, embedding, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now(), now())
+		ON CONFLICT (entity_type, entity_id, model, language) DO UPDATE SET
+			embedding = EXCLUDED.embedding,
+			updated_at = now()
+	`, s.schema, embeddingVectorsTable)
+
+	_, err := s.pool.Exec(ctx, q, entityType, entityID, model, language, pgvector.NewHalfVector(embedding))
+	return err
+}

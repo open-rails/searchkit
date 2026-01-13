@@ -1,0 +1,8 @@
+{
+  "items": [
+    "Per-(model, language) ANN indexes (cosine + binary).",
+    "Better lock/lease semantics for `search_dirty` (skip-locked + retryable backoff).",
+    "Optional cleanup command for removed models (drop indexes + delete old embeddings)."
+  ]
+}
+
