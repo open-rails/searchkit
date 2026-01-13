@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"strings"
@@ -216,6 +217,17 @@ func handleTaskResult(
 		return
 	}
 
+	log.Printf(
+		"searchkit: task failed entity_type=%s entity_id=%s model=%s language=%s attempts=%d err=%T %v",
+		task.EntityType,
+		task.EntityID,
+		task.Model,
+		task.Language,
+		task.Attempts,
+		err,
+		err,
+	)
+
 	// This failure counts as the next attempt (tasks.Attempts is prior failures).
 	task.Attempts = task.Attempts + 1
 
@@ -317,6 +329,7 @@ func processBatch(ctx context.Context, rt *runtime.Runtime, repo *tasks.Repo, cf
 					embedItems[i] = runtime.TextEmbeddingItem{
 						EntityType: it.task.EntityType,
 						EntityID:   it.task.EntityID,
+						Language:   it.task.Language,
 						Document:   it.doc,
 					}
 				}
