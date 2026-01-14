@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -61,22 +62,57 @@ type PGroongaOptions struct {
 	Prefix bool
 
 	// ScoreK controls normalization: normalized = raw / (raw + ScoreK).
-	// Defaults to 10.
+	// Defaults to 1.
 	ScoreK float32
 }
 
 // NormalizePGroongaScore converts a raw PGroonga score into a [0..1] range
 // suitable for blending with other lexical backends.
 //
-// Normalization uses: raw / (raw + k). k defaults to 10.
+// Normalization uses: raw / (raw + k). k defaults to 1.
 func NormalizePGroongaScore(raw float32, k float32) float32 {
 	if raw <= 0 {
 		return 0
 	}
 	if k <= 0 {
-		k = 10
+		k = 1
 	}
 	return raw / (raw + k)
+}
+
+func sanitizePGroongaQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return ""
+	}
+
+	// We intentionally avoid PGroonga's query parser features and only keep
+	// "word-ish" characters. This prevents special query syntax from being
+	// interpreted and keeps queries cheap/deterministic.
+	var b strings.Builder
+	b.Grow(len(q))
+	lastSpace := false
+	for _, r := range q {
+		keep := unicode.IsLetter(r) || unicode.IsNumber(r)
+		if keep {
+			b.WriteRune(r)
+			lastSpace = false
+			continue
+		}
+		if unicode.IsSpace(r) {
+			if !lastSpace {
+				b.WriteByte(' ')
+				lastSpace = true
+			}
+			continue
+		}
+		// Treat everything else as a separator.
+		if !lastSpace {
+			b.WriteByte(' ')
+			lastSpace = true
+		}
+	}
+	return strings.TrimSpace(strings.Join(strings.Fields(b.String()), " "))
 }
 
 func buildPGroongaTypeaheadQuery(q string) string {
@@ -163,6 +199,11 @@ func PGroongaSearch(ctx context.Context, pool *pgxpool.Pool, query string, opts 
 	if q == "" {
 		return []PGroongaHit{}, nil
 	}
+
+	q = sanitizePGroongaQuery(q)
+	if q == "" {
+		return []PGroongaHit{}, nil
+	}
 	if opts.Prefix {
 		q = buildPGroongaTypeaheadQuery(q)
 		if q == "" {
@@ -191,7 +232,7 @@ func PGroongaSearch(ctx context.Context, pool *pgxpool.Pool, query string, opts 
 
 	k := opts.ScoreK
 	if k <= 0 {
-		k = 10
+		k = 1
 	}
 
 	var out []PGroongaHit

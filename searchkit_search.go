@@ -57,32 +57,58 @@ type SearchHit struct {
 //
 // using Reciprocal Rank Fusion (RRF), so results don’t depend on raw score scale.
 func Search(ctx context.Context, pool *pgxpool.Pool, query string, req SearchRequest) ([]SearchHit, error) {
-	var lexKeys []search.RRFKey
+	q := normalizeWhitespace(query)
+	if q == "" || !hasAnyLetterOrNumber(q) {
+		return []SearchHit{}, nil
+	}
+
+	var lexLists [][]search.RRFKey
 	{
 		lang := strings.ToLower(strings.TrimSpace(req.Language))
-		// For ja/zh/ko, prefer PGroonga lexical search (native script / segmentation).
 		if lang == "ja" || lang == "zh" || lang == "ko" {
-			lex, err := search.PGroongaSearch(ctx, pool, query, search.PGroongaOptions{
-				Schema:      req.Schema,
-				Language:    req.Language,
-				EntityTypes: req.LexicalEntityTypes,
-				Limit:       req.Limit,
-				Prefix:      false,
-			})
-			if err != nil {
-				return nil, err
-			}
-			lexKeys = make([]search.RRFKey, 0, len(lex))
-			for _, h := range lex {
-				lexKeys = append(lexKeys, search.RRFKey{
-					EntityType: h.EntityType,
-					EntityID:   h.EntityID,
-					Language:   h.Language,
-					Model:      "",
+			usePGroonga := containsCJKScript(q)
+			useTrigram := containsASCIIAlphaNum(q)
+
+			// Trigram lexical (romaji/pinyin)
+			if useTrigram {
+				lex, err := search.LexicalSearch(ctx, pool, q, search.LexicalOptions{
+					Schema:        req.Schema,
+					Language:      req.Language,
+					EntityTypes:   req.LexicalEntityTypes,
+					Limit:         req.Limit,
+					MinSimilarity: 0.1,
 				})
+				if err != nil {
+					return nil, err
+				}
+				keys := make([]search.RRFKey, 0, len(lex))
+				for _, h := range lex {
+					keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+				}
+				lexLists = append(lexLists, keys)
+			}
+
+			// PGroonga lexical (native script)
+			if usePGroonga {
+				lex, err := search.PGroongaSearch(ctx, pool, q, search.PGroongaOptions{
+					Schema:      req.Schema,
+					Language:    req.Language,
+					EntityTypes: req.LexicalEntityTypes,
+					Limit:       req.Limit,
+					Prefix:      false,
+					ScoreK:      1,
+				})
+				if err != nil {
+					return nil, err
+				}
+				keys := make([]search.RRFKey, 0, len(lex))
+				for _, h := range lex {
+					keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+				}
+				lexLists = append(lexLists, keys)
 			}
 		} else {
-			lex, err := search.FTSSearch(ctx, pool, query, search.FTSOptions{
+			lex, err := search.FTSSearch(ctx, pool, q, search.FTSOptions{
 				Schema:      req.Schema,
 				Language:    req.Language,
 				EntityTypes: req.LexicalEntityTypes,
@@ -91,15 +117,11 @@ func Search(ctx context.Context, pool *pgxpool.Pool, query string, req SearchReq
 			if err != nil {
 				return nil, err
 			}
-			lexKeys = make([]search.RRFKey, 0, len(lex))
+			keys := make([]search.RRFKey, 0, len(lex))
 			for _, h := range lex {
-				lexKeys = append(lexKeys, search.RRFKey{
-					EntityType: h.EntityType,
-					EntityID:   h.EntityID,
-					Language:   h.Language,
-					Model:      "",
-				})
+				keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
 			}
+			lexLists = append(lexLists, keys)
 		}
 	}
 
@@ -132,7 +154,11 @@ func Search(ctx context.Context, pool *pgxpool.Pool, query string, req SearchReq
 		})
 	}
 
-	fused := search.FuseRRF([][]search.RRFKey{lexKeys, semKeys}, search.RRFOptions{K: req.RRFK})
+	lists := make([][]search.RRFKey, 0, len(lexLists)+1)
+	lists = append(lists, lexLists...)
+	lists = append(lists, semKeys)
+
+	fused := search.FuseRRF(lists, search.RRFOptions{K: req.RRFK})
 	out := make([]SearchHit, 0, len(fused))
 	for _, h := range fused {
 		out = append(out, SearchHit{
