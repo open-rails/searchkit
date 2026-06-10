@@ -1,7 +1,7 @@
 {
   "issues": [
     {
-      "name": "Searchkit Core (Lexical + Semantic)",
+      "name": "Content plane — core retrieval: lexical + semantic [done]",
       "tasks": [
         "[x] Postgres migrations for `search_documents`, `search_dirty`, embedding tables",
         "[x] Language-specific lexical docs (pg_trgm + heavy normalization)",
@@ -10,7 +10,7 @@
       ]
     },
     {
-      "name": "Add BM25/FTS Lexical Search",
+      "name": "Content plane — BM25/FTS lexical search [done]",
       "tasks": [
         "[x] Extend `search_documents` to store both raw lexical text (for FTS) and heavy-normalized text (for trigram) without changing the host callback interface",
         "[x] Add per-language `tsvector` column(s) and GIN index(es) for FTS",
@@ -23,7 +23,7 @@
       ]
     },
     {
-      "name": "Single Worker Loop",
+      "name": "Content plane — indexing worker (search_dirty -> backfill -> embeddings) [done]",
       "tasks": [
         "[x] `worker.SyncOnce(...)` entrypoint",
         "[x] Process `search_dirty` (upsert docs, enqueue embeddings, delete artifacts on delete)",
@@ -33,18 +33,18 @@
       ]
     },
     {
-      "name": "Docs + Naming",
+      "name": "Content plane — docs + naming [done]",
       "tasks": [
         "[x] Update `README.md` to be a host-facing manual",
         "[x] Remove remaining \"embeddingkit\" naming in code/comments"
       ]
     },
     {
-      "name": "CJK/Korean Lexical Search: Add PGroonga (Typeahead + FTS replacement)",
+      "name": "Content plane — CJK/Korean lexical search (PGroonga) [done]",
       "tasks": [
         "=== GOAL ===",
-        "[ ] Improve lexical search quality for `ja`/`zh`/`ko` (PGroonga-backed tokenization/matching) and make typeahead usable in native script for `ja`/`zh`/`ko`.",
-        "[ ] Keep existing Postgres FTS (`tsvector` + `ts_rank_cd`) for stemmer-backed languages (en/es/de/...).",
+        "[x] Improve lexical search quality for `ja`/`zh`/`ko` (PGroonga-backed tokenization/matching) and make typeahead usable in native script for `ja`/`zh`/`ko`.",
+        "[x] Keep existing Postgres FTS (`tsvector` + `ts_rank_cd`) for stemmer-backed languages (en/es/de/...).",
         "",
         "=== PG SETUP (POSTGRES) ===",
         "[x] Document required Postgres packages + how to install in Docker (PGroonga + dependencies).",
@@ -70,7 +70,7 @@
       ]
     },
     {
-      "name": "Query Parsing: hyphen-safe FTS + natural-language negation (deprecate '-term')",
+      "name": "Content plane — query parsing: hyphen-safe FTS + NL negation [done]",
       "tasks": [
         "=== PROBLEM ===",
         "[x] Fix `big-breasts` parsing in Postgres FTS: `websearch_to_tsquery` treats '-' as NOT, so hyphenated slugs/terms can behave like negation.",
@@ -92,7 +92,7 @@
       ]
     },
     {
-      "name": "Host API: add text-only SearchKit client (hide embeddings from host apps)",
+      "name": "Content plane — text-only client API (seed of the unified Hub surface) [done]",
       "tasks": [
         "=== GOAL ===",
         "[x] Host apps call a single text-based API and never compute embeddings / `QueryVec`.\n  - `client.Search(ctx, userText, opts)`\n  - SearchKit handles query normalization + embedding (when semantic is enabled).\n  - Old APIs removed; no backwards-compat layer.",
@@ -119,6 +119,160 @@
         "",
         "=== DOCS ===",
         "[x] Update `README.md`:\n  - Document only the client API for host apps.\n  - Show minimal host usage examples for typeahead + search.\n  - Document embedder requirements and defaults.\n  - Document the new worker function name (`worker.SyncOnce`)."
+      ]
+    },
+    {
+      "name": "Discovery Hub: north star (embedded entity+signal library; SaaS -> future.json)",
+      "tasks": [
+        "=== GOAL ===",
+        "[ ] Evolve searchkit from hybrid search into an embedded entity + signal library that answers ranked-id queries (search / similar / popular / recommend / unseen) and enriches results with per-user view context (seen? how far?), reading the shared DB; the host hydrates ids -> cards. See `docs/DESIGN.md`. (Standalone SaaS server is later -> agents/future.json.)",
+        "",
+        "=== PLANES ===",
+        "[ ] Content plane (exists): entity registry + lexical/semantic/VL + RRF/MMR + SimilarTo.",
+        "[ ] Signal plane (new): `(tenant, subject, entity_type, entity_id) -> signals`; append-only event stream + durable current-state. See `docs/signal-plane.md`.",
+        "[ ] Discovery plane (the join): personalized search, recommendations, history, unseen over entities x signals.",
+        "",
+        "=== PRINCIPLE: mechanism vs meaning ===",
+        "[ ] The hub owns mechanism (storage/indexing/aggregation/queries); the host owns meaning. No business noun (premium, pages, reading) in the schema — entity types, signal types, facets, scoring weights, and filters are host-defined data, so any content-hosting service can adopt it.",
+        "",
+        "=== SCOPE: now vs later ===",
+        "[ ] NOW (this file): embedded library — id-returning queries + view-context enrichment; host hydrates ids.",
+        "[ ] LATER (agents/future.json): standalone SaaS server (frontend->api-server->searchkit, and frontend->searchkit), push ingestion, generic-facet gating, render payloads, multi-tenancy.",
+        "",
+        "=== NON-GOALS ===",
+        "[ ] A raw 'view counter' is explicitly NOT a goal; it is a trivial aggregate over the signal stream."
+      ]
+    },
+    {
+      "name": "Signal Plane: event stream + current-state + Scorer",
+      "tasks": [
+        "=== GOAL ===",
+        "[ ] Record per-user engagement/interaction signals and project a durable per-(subject,entity) state. See `docs/signal-plane.md`.",
+        "",
+        "=== DATA MODEL ===",
+        "[ ] Append-only event stream: tenant, entity_type, entity_id, subject, signal_type (HOST-DEFINED), occurred_at, duration_s, progress, progress_max, value, label, weight, score, completed, payload. Signals carry consumption (progress) and/or explicit feedback (value) and/or categorical (label). One row per session/interaction (NEVER per read).",
+        "[ ] Durable current-state projection (no TTL): first_seen_at, last_signal_at, total_events, max_progress, progress_max, completed, resume (opaque last-position pointer), has_interacted, last_score; ReplacingMergeTree(last_updated) keyed `(tenant, subject, entity_type, entity_id)`.",
+        "[ ] Columns are generic (`progress`/`progress_max`), not entity-specific (`max_page_reached`).",
+        "",
+        "=== API ===",
+        "[ ] `RecordSignal(ctx, Signal)` — append event + upsert current-state.",
+        "[ ] `Scorer` interface (host-provided per entity type): `Score(session) -> (score, progress, progress_max, completed)`.",
+        "",
+        "=== TESTING ===",
+        "[ ] Idempotent current-state upsert under event replays; anonymous (AnonKey) vs logged-in (UserID) subjects.",
+        "",
+        "=== DOCS ===",
+        "[ ] Document the signal model + Scorer contract."
+      ]
+    },
+    {
+      "name": "View-context enrichment + history / unseen / engagement (id-returning)",
+      "tasks": [
+        "=== GOAL ===",
+        "[ ] Per-user reads over the signal plane, all id-returning (host hydrates): view-context enrichment (States), history (seen), unseen (catalog minus seen), engagement aggregates.",
+        "",
+        "=== APIS ===",
+        "[ ] `History(subject, opts)`: current-state by subject, last_seen_at DESC; filter seen/in_progress/completed (max_progress vs progress_max).",
+        "[ ] `Unseen(subject, opts)`: returns ids = host `EntityCatalog.Universe(type)` (host applies its OWN visibility/premium filters against its own tables) MINUS subject seen-set (max_progress>0). Embedded reads the host catalog; hub-side generic-facet gating -> future.json.",
+        "[ ] `Engagement(entity)`: unique subjects, completion rate, avg score, signal counts by type (interaction-weighted, not raw volume).",
+        "[ ] `States(subject, refs[])` (THE 'enrich with view context' query): bulk current-state — per entity seen?, max_progress/progress_max (YouTube-style progress bar), completed?, resume pointer. Point/IN lookup on current_state; annotates any list (search/popular/similar/history) cheaply.",
+        "[ ] `EntityCatalog` interface (host-provided) supplies the unseen universe by reading the host's own tables (embedded); the host owns visibility/gating. Hub-side facets are the standalone path (future.json).",
+        "",
+        "=== STORE SPLIT ===",
+        "[ ] Resolve the unseen anti-join across the host catalog (Postgres) + ClickHouse seen-set: return seen-ids for a host-side diff, or mirror a thin catalog into CH. See `docs/signal-plane.md`.",
+        "",
+        "=== TESTING ===",
+        "[ ] Unseen excludes already-seen; history ordering; completion thresholds per Scorer."
+      ]
+    },
+    {
+      "name": "Embedded library: in-process Hub, shared DB, dedicated schema (single tenant)",
+      "tasks": [
+        "=== GOAL ===",
+        "[ ] searchkit runs in-process inside the host (doujins, hentai0), reading/writing the shared DB; no network hop. Returns ranked ids + enriches with view context; the host hydrates ids -> cards from its own DB (no presentation data stored in searchkit). See `docs/api-surface.md`.",
+        "",
+        "=== INTERFACE ===",
+        "[ ] Define `Hub` interface (Search, Typeahead, SimilarTo, RecordSignal, History, Unseen, States, Engagement, Popular, Recommend; content indexed via existing host callbacks).",
+        "[ ] `NewEmbedded(Config{PG, CH, schema})`: in-process; single implicit tenant.",
+        "",
+        "=== PLACEMENT ===",
+        "[ ] Dedicated Postgres schema (configurable; NOT the host app schema -> avoids `entities`/`search_documents` collisions) + dedicated ClickHouse database. `tenant_id` column present with one value (so embedded + future multi-tenant share code).",
+        "",
+        "=== HYDRATION ===",
+        "[ ] Queries return entity ids + scores (+ State on enrich); host joins ids -> cards (thumbnails/links) locally. Render payloads + frontend-direct -> agents/future.json.",
+        "",
+        "=== TESTING ===",
+        "[ ] In-process round-trip for each Hub method against a real PG + CH."
+      ]
+    },
+    {
+      "name": "Popularity & trending (windowed rankings: fixed windows + arbitrary date slices)",
+      "tasks": [
+        "=== GOAL ===",
+        "[ ] Rank entities by popularity over any time window — fixed (30/90/365d) AND arbitrary date slices (e.g. 2025-06-05 -> 2025-08-08), per tenant, facet-filterable. Same data feeds recs cold-start + search ranking.",
+        "",
+        "=== DATA MODEL ===",
+        "[ ] Daily rollup `entity_daily` (AggregatingMergeTree) keyed (tenant, entity_type, entity_id, day): unique subjects (uniqExactState), signals, engagement sum, completions, per-signal-type counts; materialized view from `signal_events`.",
+        "[ ] Retain `entity_daily` long-term (tiny: one row/entity/day) so 'past year' + historical slices survive even if raw `signal_events` expire sooner.",
+        "",
+        "=== API ===",
+        "[ ] `Popular(entity_type, window, filter, limit)` — window = Last(30d|90d|365d) | Between(a,b) | AllTime; embedded: host applies visibility/gating against its own tables.",
+        "[ ] Fixed + arbitrary windows merge day-buckets from `entity_daily`; sub-day/custom falls back to scanning `signal_events` (month-partitioned).",
+        "[ ] Default ranking (log-scaled volume x avg engagement, optional time-decay + Bayesian prior); host-tunable weights or host ranking expression (mechanism vs meaning).",
+        "",
+        "=== TESTING ===",
+        "[ ] Fixed-window and arbitrary-slice rankings match a raw-events ground truth; facet filter + tenant scoping respected; tiny-sample entities don't outrank high-volume ones."
+      ]
+    },
+    {
+      "name": "Personalized search (signal-aware ranking)",
+      "tasks": [
+        "=== GOAL ===",
+        "[ ] Fuse signal aggregates (per-user affinity + per-entity popularity) into content ranking, per tenant. A per-request toggle the host flips (e.g. only for logged-in users / some surfaces) — not always-on. Heavy lift — sequence after the substrate is proven across >=2 consumers.",
+        "",
+        "=== IMPLEMENTATION ===",
+        "[ ] Per-entity popularity + per-(subject,entity) affinity features from the signal plane.",
+        "[ ] Blend into `Search` results (RRF / learned weights); optional demotion of already-seen/completed entities.",
+        "[ ] Keep lexical/semantic recall unchanged; this is a ranking-only layer.",
+        "",
+        "=== TESTING ===",
+        "[ ] Ranking improves for engaged users vs cold; seen-demotion toggle works."
+      ]
+    },
+    {
+      "name": "Recommendations (content-based + collaborative)",
+      "tasks": [
+        "=== GOAL ===",
+        "[ ] `Recommend(subject, opts)`: content-based (SimilarTo) + collaborative filtering over the (subject x entity x score) matrix, per tenant. The most open-ended workstream — last.",
+        "",
+        "=== IMPLEMENTATION ===",
+        "[ ] Two shapes: (a) Similar 'more-like-this' (item->items): fuse semantic SimilarTo + lexical/shared-tags + co-engagement (subjects who engaged X also engaged Y); works without a user, optional personalization. (b) 'For you' (user->items).",
+        "[ ] Content-based: SimilarTo seeded from the subject's high-signal entities (primitive exists).",
+        "[ ] Collaborative: item-item / user-user from the signal matrix; cold-start fallback to popularity + content.",
+        "[ ] Filter out already-seen (via current-state); diversity via MMR.",
+        "",
+        "=== TESTING ===",
+        "[ ] Recs exclude seen; cold-start returns sensible popularity/content results."
+      ]
+    },
+    {
+      "name": "Consumer rollout: doujins blog (pilot) -> galleries -> hentai0 video",
+      "tasks": [
+        "=== BLOG (PILOT) ===",
+        "[ ] doujins `blog_post` entity type: index title/body (existing host indexing), blog Scorer (read-time + scroll depth; completed >=90% scroll OR >= est read-time).",
+        "[ ] Wire history + unseen + engagement for blog posts.",
+        "[ ] DELETE the legacy blog view counter: `blog_post_visitors` + `blog_post_uv_*` + their MVs + InsertBlogPostVisitor/GetBlogPostUniqueViews/BlogPostVisitorEvent + the blog handler insert.",
+        "[ ] Frontend: active read-time + scroll-depth exit beacon; unread + history UI.",
+        "",
+        "=== GALLERIES (MIGRATION) ===",
+        "[ ] Migrate existing gallery analytics (gallery_view_events, user_history_current, gallery_interactions) onto the hub; gallery Scorer (pages / page_count).",
+        "[ ] Re-back doujins read surfaces on the hub: GetHomePopularGalleries (1d/7d/30d/60d/365d/all + NEW arbitrary date slices) -> Popular(); GetUserViewHistory -> History(); GetGalleryIDsByViewStatus (seen/unseen/in-progress/completed) -> History/Unseen(); GetUserGalleryProgress -> current-state. See doujins/docs/searchkit-integration.md.",
+        "[ ] Retire the bespoke gallery analytics tables/services (v_gallery_popularity_*, etc.) once parity is verified.",
+        "[ ] doujins runs the hub EMBEDDED, pointed at a dedicated schema + ClickHouse db (single tenant = doujins); searchkit tables move out of the `doujins` schema.",
+        "",
+        "=== HENTAI0 (VIDEO) ===",
+        "[ ] hentai0 `video` entity type as a separate tenant; video Scorer (watch-time / % watched).",
+        "[ ] Wire search + history + unseen + recs for videos."
       ]
     }
   ]

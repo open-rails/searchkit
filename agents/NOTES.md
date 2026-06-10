@@ -3,6 +3,25 @@
 This document holds implementation notes and extra details that are intentionally
 not part of the main `README.md` manual.
 
+## Direction: unified hub
+
+searchkit is evolving from a hybrid-search library into a **unified entity + signal platform** —
+search + recommendations + history + "unseen" + engagement — runnable embedded or as a multi-tenant
+SaaS server. Canonical design: [`../docs/DESIGN.md`](../docs/DESIGN.md),
+[`../docs/signal-plane.md`](../docs/signal-plane.md), [`../docs/api-surface.md`](../docs/api-surface.md).
+
+Key deltas vs. the notes below (which describe the current **content plane** — search/indexing):
+
+- **Ingestion**: host pull-callbacks (`BuildLexicalString`/`BuildSemanticDocument`/`ListAssetURLs`)
+  → host **push** (`UpsertEntity`), so embedded and server modes are symmetric.
+- **New signal plane**: `(tenant, subject, entity_type, entity_id) -> signals` (engagement / history /
+  unseen / personalized ranking).
+- **Tenancy**: the entity key gains a tenant dimension; multi-tenant server mode, single-tenant embedded.
+- **Recommendations**: `SimilarTo` (below) becomes one input to a broader recs surface (content-based
+  + collaborative).
+
+The notes below remain accurate for the content plane as it works today.
+
 ## Design goals
 
 - Multiple embedding models without schema churn: store embeddings as rows keyed

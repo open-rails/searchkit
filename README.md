@@ -12,6 +12,13 @@
 
 This README is a **manual** for host applications. Design notes live in `agents/NOTES.md`.
 
+> **Status & direction.** searchkit is evolving from a hybrid-search library into a **unified entity
+> + signal platform** — search + recommendations + history + "unseen" + engagement — runnable both
+> **embedded** and as a **multi-tenant SaaS server**. Canonical design:
+> [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/signal-plane.md`](docs/signal-plane.md),
+> [`docs/api-surface.md`](docs/api-surface.md). The sections below document the **current** library
+> (still accurate today); the parts being replaced by the new design are flagged inline.
+
 ## Host app integration (manual)
 
 ### 1) Apply Postgres migrations (required)
@@ -57,6 +64,12 @@ For VL, the contract is URL-only (the host app provides presigned/public URLs).
 
 ### 3) Wire host callbacks (batch-first)
 
+> ⚠️ **Changing (new design).** Pull-callbacks (`BuildLexicalString` / `BuildSemanticDocument` /
+> `ListAssetURLs`) are being replaced by **push ingestion**: the host will call `UpsertEntity(...)`
+> with the lexical/semantic text + asset URLs. Pull-callbacks only work *embedded*; push makes the
+> embedded and server modes symmetric. See [`docs/api-surface.md`](docs/api-surface.md). The callback
+> model below is how it works **today**.
+
 Host apps provide:
 
 - `runtime.BuildSemanticDocument(ctx, entity_type, language, []entity_id) -> map[id]string` (**required**)
@@ -66,6 +79,10 @@ Host apps provide:
 - `vl.ListAssetURLs(ctx, entity_type, []entity_id) -> map[id][]AssetURL` (required only if VL models are enabled)
 
 ### 4) Mark changes (host writes `search_dirty`)
+
+> ⚠️ **Changing (new design).** With push ingestion the host calls `UpsertEntity` and searchkit marks
+> `search_dirty` internally — hosts will no longer write `search_dirty` directly. Current behavior
+> below.
 
 The host does **not** enqueue per-model tasks directly.
 Instead, it upserts into `<schema>.search_dirty`:
