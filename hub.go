@@ -43,6 +43,9 @@ func (f EntityCatalogFunc) Universe(ctx context.Context, tenant string, entityTy
 // DB. Every method is implicitly tenant-scoped (pinned at construction in
 // embedded mode).
 type Hub interface {
+	// Tenant returns the tenant this hub instance is scoped to.
+	Tenant() string
+
 	// Content plane.
 	Search(ctx context.Context, userText string, opts HubSearchOptions) ([]SearchHit, error)
 	Typeahead(ctx context.Context, userText string, opts TypeaheadOptions) ([]TypeaheadHit, error)
@@ -50,15 +53,29 @@ type Hub interface {
 
 	// Signal plane.
 	RecordSignal(ctx context.Context, s signal.Signal) error
+	RecordSignals(ctx context.Context, signals []signal.Signal) error
+	Forget(ctx context.Context, subject signal.Subject, entityType, entityID string) error
 
 	// Discovery plane.
 	History(ctx context.Context, subject signal.Subject, opts signal.HistoryOptions) ([]signal.StateRow, error)
+	HistoryCount(ctx context.Context, subject signal.Subject, opts signal.HistoryOptions) (int64, error)
+	SeenIDs(ctx context.Context, subject signal.Subject, entityType string) (map[string]struct{}, error)
 	Unseen(ctx context.Context, subject signal.Subject, opts UnseenOptions) ([]string, error)
 	States(ctx context.Context, subject signal.Subject, refs []signal.EntityRef) (map[signal.EntityRef]signal.State, error)
 	Engagement(ctx context.Context, ref signal.EntityRef) (signal.EntityEngagement, error)
 	Popular(ctx context.Context, entityType string, opts signal.PopularOptions) ([]signal.PopularHit, error)
+	PopularityFor(ctx context.Context, entityType string, ids []string, window signal.Window) (map[string]float64, error)
+	SubjectCounts(ctx context.Context, entityType string, ids []string, window signal.Window) (map[string]uint64, error)
 	Recommend(ctx context.Context, subject signal.Subject, opts RecommendOptions) ([]RecHit, error)
+
+	// Maintenance.
+	RefreshCoEngagement(ctx context.Context, opts signal.RefreshCoEngagementOptions) error
 }
+
+// EmbeddedHub implements the full Hub surface; a future remote client must
+// too (cross-mode conformance, see agents/future.json). Embedded-only
+// extras like Client() are deliberately NOT part of the interface.
+var _ Hub = (*EmbeddedHub)(nil)
 
 // EmbeddedConfig configures an in-process hub against the shared DB.
 type EmbeddedConfig struct {
