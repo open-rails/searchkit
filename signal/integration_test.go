@@ -477,3 +477,112 @@ func TestIntegrationRecordSignalsFanOut(t *testing.T) {
 		t.Fatalf("tag popularity from fan-out: %+v", pop)
 	}
 }
+
+func TestIntegrationNegativeSignalsAndItemPairs(t *testing.T) {
+	st, _ := freshStore(t)
+	ctx := context.Background()
+	tenant := "t"
+
+	react := func(sub Subject, id string, kind string, value float64, day int) Signal {
+		return Signal{
+			EntityRef:  EntityRef{EntityType: "gallery", EntityID: id},
+			Subject:    sub,
+			Type:       kind,
+			OccurredAt: at(day, 12),
+			Value:      value,
+			Label:      kind,
+		}
+	}
+
+	u1, u2, u3 := Subject{UserID: "u1"}, Subject{UserID: "u2"}, Subject{UserID: "u3"}
+	signals := []Signal{
+		// u1 likes A and B; u2 likes A and C; u3 likes A but DISLIKES B.
+		react(u1, "A", "like", 1, 1), react(u1, "B", "like", 1, 1),
+		react(u2, "A", "like", 1, 2), react(u2, "C", "like", 1, 2),
+		react(u3, "A", "like", 1, 3), react(u3, "B", "dislike", -1, 3),
+	}
+	for _, s := range signals {
+		if err := st.RecordSignal(ctx, tenant, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// State carries net sentiment.
+	states, err := st.States(ctx, tenant, u3, []EntityRef{{EntityType: "gallery", EntityID: "B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := states[EntityRef{EntityType: "gallery", EntityID: "B"}].NetValue; got >= 0 {
+		t.Fatalf("disliked B must have negative NetValue, got %v", got)
+	}
+
+	// NegativeIDs returns the dislike set.
+	neg, err := st.NegativeIDs(ctx, tenant, u3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := neg[EntityRef{EntityType: "gallery", EntityID: "B"}]; !ok || len(neg) != 1 {
+		t.Fatalf("negative ids: %v", neg)
+	}
+
+	// TopStates with ExcludeNegative drops B for u3.
+	top, err := st.TopStates(ctx, tenant, u3, TopStatesOptions{ExcludeNegative: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range top {
+		if r.EntityID == "B" {
+			t.Fatalf("disliked entity must not seed: %+v", top)
+		}
+	}
+
+	// Query-time co-engagement from anchor A: B has 2 positive co-subjects
+	// (u1) and 1 negative (u3) -> net 1; C has 1.
+	co, err := st.CoEngaged(ctx, tenant, EntityRef{EntityType: "gallery", EntityID: "A"}, CoEngagedOptions{Limit: 10, SkipRollup: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strengthOf := func(hits []CoEngagedHit, id string) int64 {
+		for _, h := range hits {
+			if h.EntityID == id {
+				return h.Strength
+			}
+		}
+		return 0
+	}
+	if strengthOf(co, "B") != 0 { // u1 likes B (+1), u3 dislikes B (-1) -> wait, u1 is 1 positive, u3 is 1 negative => net 0 -> excluded by HAVING
+		t.Fatalf("B net strength should be 0 (excluded): %+v", co)
+	}
+	if strengthOf(co, "C") != 1 {
+		t.Fatalf("C net strength should be 1: %+v", co)
+	}
+
+	// Rollup path: refresh item_pairs and read through it.
+	if err := st.RefreshCoEngagement(ctx, tenant, RefreshCoEngagementOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	coR, err := st.CoEngaged(ctx, tenant, EntityRef{EntityType: "gallery", EntityID: "A"}, CoEngagedOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strengthOf(coR, "C") != 1 {
+		t.Fatalf("rollup co-engagement for C should be 1: %+v", coR)
+	}
+	for _, h := range coR {
+		if h.EntityID == "B" && h.Strength > 0 {
+			t.Fatalf("rollup must net out the dislike on B: %+v", coR)
+		}
+	}
+
+	// Refresh is idempotent (DELETE + INSERT).
+	if err := st.RefreshCoEngagement(ctx, tenant, RefreshCoEngagementOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	coR2, err := st.CoEngaged(ctx, tenant, EntityRef{EntityType: "gallery", EntityID: "A"}, CoEngagedOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(coR2) != len(coR) {
+		t.Fatalf("refresh not idempotent: %d vs %d", len(coR2), len(coR))
+	}
+}

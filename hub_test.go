@@ -281,7 +281,7 @@ func TestHubRecommendColdStartFallsBackToPopular(t *testing.T) {
 func TestHubRecommendUsesCoEngagementAndExcludesSeen(t *testing.T) {
 	now := time.Now().UTC()
 	stateRow := func(id string, score int16) []any {
-		return []any{"gallery", id, now, now, uint32(3), uint32(10), uint32(10), true, "", true, score}
+		return []any{"gallery", id, now, now, uint32(3), uint32(10), uint32(10), true, "", true, score, float64(0)}
 	}
 	fc := &hubFakeConn{rowsFor: map[string][][]any{
 		// TopStates -> one strong seed.
@@ -290,8 +290,8 @@ func TestHubRecommendUsesCoEngagementAndExcludesSeen(t *testing.T) {
 		"max_progress > 0": {{"gSeen"}, {"seed1"}},
 		// CoEngaged for the seed.
 		"NOT (entity_type = ? AND entity_id = ?)": {
-			{"gallery", "gNew", uint64(7)},
-			{"gallery", "gSeen", uint64(5)},
+			{"gallery", "gNew", int64(7)},
+			{"gallery", "gSeen", int64(5)},
 		},
 	}}
 	h := newTestHub(t, fc, nil) // no DefaultModel -> vector source skipped
@@ -323,8 +323,8 @@ func TestHubRecommendRequiresEntityTypes(t *testing.T) {
 func TestHubSimilarToCoEngagementOnly(t *testing.T) {
 	fc := &hubFakeConn{rowsFor: map[string][][]any{
 		"NOT (entity_type = ? AND entity_id = ?)": {
-			{"gallery", "g2", uint64(4)},
-			{"gallery", "g3", uint64(2)},
+			{"gallery", "g2", int64(4)},
+			{"gallery", "g3", int64(2)},
 		},
 	}}
 	h := newTestHub(t, fc, nil)

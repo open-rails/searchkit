@@ -106,7 +106,12 @@ recs, _  := hub.Recommend(ctx, user, searchkit.RecommendOptions{EntityTypes: []s
   engagement; tune via `RankWeights` (incl. `HalfLifeDays` time decay) or replace with a trusted
   `RankExpr`.
 - `Recommend` fuses content similarity (seeded from the subject's high-signal entities) with
-  co-engagement, excludes seen, and falls back to popularity on cold start.
+  co-engagement, excludes seen, and falls back to popularity on cold start. **Negative feedback
+  demotes**: signals with `Value < 0` (e.g. a dislike) exclude an entity from seeds and results,
+  count *against* co-engagement strength, and (in personalized search) apply a strong
+  `DislikePenalty`. Co-engagement reads the precomputed `item_pairs` rollup when present — refresh
+  it periodically via `hub.RefreshCoEngagement(...)` — and falls back to a query-time scan.
+  Optional MMR diversity via `DiversityLambda` (uses stored embeddings; best-effort).
 - `hub.Search(..., HubSearchOptions{Personalize: &searchkit.Personalization{Subject: user, DemoteSeen: true}})`
   blends candidate popularity into the ranking and demotes seen/completed entities — recall
   unchanged, ranking only, per-request toggle.

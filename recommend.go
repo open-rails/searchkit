@@ -32,6 +32,11 @@ type RecommendOptions struct {
 	// IncludeSeen keeps already-seen entities in results (default: excluded).
 	IncludeSeen bool
 
+	// DiversityLambda enables MMR diversity re-ranking over the fused
+	// candidates using stored embeddings: (0,1), higher = more relevance /
+	// less diversity. 0 disables. Best-effort: skipped when no vectors exist.
+	DiversityLambda float32
+
 	// PopularWindow is the popularity window used to fill out results on
 	// cold start or thin candidate sets (default: last 30 days).
 	PopularWindow signal.Window
@@ -85,8 +90,9 @@ func (h *EmbeddedHub) Recommend(ctx context.Context, subject signal.Subject, opt
 	}
 
 	seeds, err := store.TopStates(ctx, h.tenant, subject, signal.TopStatesOptions{
-		EntityTypes: opts.SeedEntityTypes,
-		Limit:       seedLimit,
+		EntityTypes:     opts.SeedEntityTypes,
+		ExcludeNegative: true, // disliked items must not seed recommendations
+		Limit:           seedLimit,
 	})
 	if err != nil {
 		return nil, err
@@ -149,7 +155,8 @@ func (h *EmbeddedHub) Recommend(ctx context.Context, subject signal.Subject, opt
 		fused = search.FuseRRF(lists, search.RRFOptions{K: h.client.defaultRRFK, Weights: weights})
 	}
 
-	// Exclusions: seeds and (unless IncludeSeen) everything already seen.
+	// Exclusions: seeds, (unless IncludeSeen) everything already seen, and
+	// ALWAYS everything the subject has net-negative explicit feedback for.
 	seen := map[string]map[string]struct{}{}
 	if !opts.IncludeSeen {
 		for _, t := range entityTypes {
@@ -159,6 +166,10 @@ func (h *EmbeddedHub) Recommend(ctx context.Context, subject signal.Subject, opt
 			}
 			seen[t] = s
 		}
+	}
+	negative, err := store.NegativeIDs(ctx, h.tenant, subject, entityTypes)
+	if err != nil {
+		return nil, err
 	}
 	allowed := map[string]struct{}{}
 	for _, t := range entityTypes {
@@ -175,6 +186,9 @@ func (h *EmbeddedHub) Recommend(ctx context.Context, subject signal.Subject, opt
 		if _, ok := seedSet[ref]; ok {
 			return
 		}
+		if _, ok := negative[ref]; ok {
+			return
+		}
 		if _, ok := have[ref]; ok {
 			return
 		}
@@ -187,7 +201,14 @@ func (h *EmbeddedHub) Recommend(ctx context.Context, subject signal.Subject, opt
 		out = append(out, RecHit{EntityType: entityType, EntityID: entityID, Score: score})
 	}
 
+	fusedHits := make([]RecHit, 0, len(fused))
 	for _, f := range fused {
+		fusedHits = append(fusedHits, RecHit{EntityType: f.EntityType, EntityID: f.EntityID, Score: f.Score})
+	}
+	if opts.DiversityLambda > 0 {
+		fusedHits = h.diversifyRecHits(ctx, fusedHits, opts.DiversityLambda, model, opts.Language)
+	}
+	for _, f := range fusedHits {
 		if len(out) >= limit {
 			break
 		}

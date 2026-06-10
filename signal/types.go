@@ -183,6 +183,10 @@ type State struct {
 	Resume        string
 	HasInteracted bool // any explicit feedback (Value/Label) recorded
 	LastScore     int16
+	// NetValue is the sum of explicit-feedback Values (e.g. +1 like, -1
+	// dislike). Negative = the subject's current sentiment is negative;
+	// recommendations exclude such entities from seeds and results.
+	NetValue float64
 }
 
 // StateRow is a State with its entity, as returned by History.
@@ -334,17 +338,34 @@ type CoEngagedOptions struct {
 	// MaxSubjects caps the engaged-subject set read from the anchor
 	// (defaults to 10000).
 	MaxSubjects int
-	Limit       int // default 50
+	// SkipRollup forces the query-time event scan even when the item_pairs
+	// rollup has rows (e.g. for freshness-critical reads).
+	SkipRollup bool
+	Limit      int // default 50
 }
 
-// CoEngagedHit is one co-engaged entity; Strength = co-engaged subjects.
+// CoEngagedHit is one co-engaged entity. Strength is the NET co-engaged
+// subject count: subjects with non-negative engagement count for, subjects
+// with negative explicit feedback count against.
 type CoEngagedHit struct {
 	EntityRef
-	Strength uint64
+	Strength int64
+}
+
+// RefreshCoEngagementOptions controls RefreshCoEngagement.
+type RefreshCoEngagementOptions struct {
+	// Window bounds which events feed the rollup (zero = all time).
+	Window Window
+	// MaxEntitiesPerSubject caps each subject's contribution to pair
+	// generation (defaults to 100), bounding the cross-product.
+	MaxEntitiesPerSubject int
 }
 
 // TopStatesOptions controls TopStates (recommendation seeds).
 type TopStatesOptions struct {
 	EntityTypes []string
-	Limit       int // default 10
+	// ExcludeNegative drops entities the subject has net-negative explicit
+	// feedback for (a disliked item must not seed recommendations).
+	ExcludeNegative bool
+	Limit           int // default 10
 }

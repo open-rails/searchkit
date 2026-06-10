@@ -153,7 +153,7 @@ VALUES %s`, st.db, strings.Join(rows, ", "))
 	}
 	q := fmt.Sprintf(`INSERT INTO %s.signal_state
 (tenant, subject_kind, subject, entity_type, entity_id, first_seen_at, last_signal_at,
- total_events, max_progress, progress_max, completed, resume, has_interacted, last_score, last_updated)
+ total_events, max_progress, progress_max, completed, resume, has_interacted, last_score, net_value, last_updated)
 SELECT
     tenant, subject_kind, subject, entity_type, entity_id,
     min(occurred_at),
@@ -165,6 +165,7 @@ SELECT
     argMaxIf(resume, occurred_at, resume != ''),
     max(value != 0 OR label != ''),
     argMax(score, occurred_at),
+    sum(value),
     now64(3)
 FROM %s.signal_events
 WHERE tenant = ? AND (entity_type, entity_id, subject_kind, subject) IN (%s)
@@ -181,7 +182,7 @@ GROUP BY tenant, subject_kind, subject, entity_type, entity_id`, st.db, st.db, s
 func (st *Store) reprojectState(ctx context.Context, tenant string, subject Subject, ref EntityRef) error {
 	q := fmt.Sprintf(`INSERT INTO %s.signal_state
 (tenant, subject_kind, subject, entity_type, entity_id, first_seen_at, last_signal_at,
- total_events, max_progress, progress_max, completed, resume, has_interacted, last_score, last_updated)
+ total_events, max_progress, progress_max, completed, resume, has_interacted, last_score, net_value, last_updated)
 SELECT
     tenant, subject_kind, subject, entity_type, entity_id,
     min(occurred_at),
@@ -193,6 +194,7 @@ SELECT
     argMaxIf(resume, occurred_at, resume != ''),
     max(value != 0 OR label != ''),
     argMax(score, occurred_at),
+    sum(value),
     now64(3)
 FROM %s.signal_events
 WHERE tenant = ? AND entity_type = ? AND entity_id = ? AND subject_kind = ? AND subject = ?
@@ -204,7 +206,7 @@ GROUP BY tenant, subject_kind, subject, entity_type, entity_id`, st.db, st.db)
 }
 
 const stateColumns = `entity_type, entity_id, first_seen_at, last_signal_at, total_events,
- max_progress, progress_max, completed, resume, has_interacted, last_score`
+ max_progress, progress_max, completed, resume, has_interacted, last_score, net_value`
 
 func scanStateRow(rows driver.Rows) (StateRow, error) {
 	var (
@@ -214,7 +216,7 @@ func scanStateRow(rows driver.Rows) (StateRow, error) {
 	)
 	if err := rows.Scan(
 		&r.EntityType, &r.EntityID, &r.FirstSeenAt, &r.LastSignalAt, &r.TotalEvents,
-		&r.MaxProgress, &r.ProgressMax, &completed, &r.Resume, &inter, &r.LastScore,
+		&r.MaxProgress, &r.ProgressMax, &completed, &r.Resume, &inter, &r.LastScore, &r.NetValue,
 	); err != nil {
 		return StateRow{}, err
 	}
@@ -398,6 +400,38 @@ WHERE tenant = ? AND subject_kind = ? AND subject = ? AND entity_type = ? AND ma
 	return out, rows.Err()
 }
 
+// NegativeIDs returns entity ids the subject has net-negative explicit
+// feedback for (sum of signal Values < 0, e.g. a dislike): the exclusion set
+// for recommendations.
+func (st *Store) NegativeIDs(ctx context.Context, tenant string, subject Subject, entityTypes []string) (map[EntityRef]struct{}, error) {
+	if err := subject.Validate(); err != nil {
+		return nil, err
+	}
+	var sb strings.Builder
+	args := []any{tenant, subject.Kind(), subject.Key()}
+	fmt.Fprintf(&sb, `SELECT entity_type, entity_id
+FROM %s.signal_state FINAL
+WHERE tenant = ? AND subject_kind = ? AND subject = ? AND net_value < 0`, st.db)
+	if types := trimAll(entityTypes); len(types) > 0 {
+		sb.WriteString(" AND entity_type IN ?")
+		args = append(args, types)
+	}
+	rows, err := st.conn.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("signal: negative ids: %w", err)
+	}
+	defer rows.Close()
+	out := map[EntityRef]struct{}{}
+	for rows.Next() {
+		var ref EntityRef
+		if err := rows.Scan(&ref.EntityType, &ref.EntityID); err != nil {
+			return nil, fmt.Errorf("signal: negative ids scan: %w", err)
+		}
+		out[ref] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // TopStates returns the subject's highest-signal entities (recommendation
 // seeds): ordered by last_score DESC, then recency.
 func (st *Store) TopStates(ctx context.Context, tenant string, subject Subject, opts TopStatesOptions) ([]StateRow, error) {
@@ -416,6 +450,9 @@ WHERE tenant = ? AND subject_kind = ? AND subject = ?`, stateColumns, st.db)
 	if types := trimAll(opts.EntityTypes); len(types) > 0 {
 		sb.WriteString(" AND entity_type IN ?")
 		args = append(args, types)
+	}
+	if opts.ExcludeNegative {
+		sb.WriteString(" AND net_value >= 0")
 	}
 	sb.WriteString(" ORDER BY last_score DESC, last_signal_at DESC, entity_type ASC, entity_id ASC LIMIT ?")
 	args = append(args, limit)
@@ -756,9 +793,26 @@ WHERE tenant = ? AND entity_type = ? AND entity_id = ?`, st.db)
 	inner.WriteString(" LIMIT ?")
 	innerArgs = append(innerArgs, maxSubjects)
 
+	// Try the precomputed item_pairs rollup first (refreshed via
+	// RefreshCoEngagement); fall back to the event scan when it has no rows
+	// for this anchor.
+	if !opts.SkipRollup {
+		hits, err := st.coEngagedFromRollup(ctx, tenant, ref, opts, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(hits) > 0 {
+			return hits, nil
+		}
+	}
+
 	var sb strings.Builder
 	args := []any{tenant}
-	fmt.Fprintf(&sb, `SELECT entity_type, entity_id, uniqExact(concat(subject_kind, ':', subject)) AS strength
+	// Net strength: subjects whose relation to the candidate is non-negative
+	// count for; subjects with negative explicit feedback count against.
+	fmt.Fprintf(&sb, `SELECT entity_type, entity_id,
+  toInt64(uniqExactIf(concat(subject_kind, ':', subject), value >= 0))
+  - toInt64(uniqExactIf(concat(subject_kind, ':', subject), value < 0)) AS strength
 FROM %s.signal_events
 WHERE tenant = ?
   AND (subject_kind, subject) IN (%s)
@@ -777,7 +831,7 @@ WHERE tenant = ?
 		sb.WriteString(" AND occurred_at <= ?")
 		args = append(args, opts.Window.To.UTC())
 	}
-	sb.WriteString("\nGROUP BY entity_type, entity_id\nORDER BY strength DESC, entity_type ASC, entity_id ASC\nLIMIT ?")
+	sb.WriteString("\nGROUP BY entity_type, entity_id\nHAVING strength > 0\nORDER BY strength DESC, entity_type ASC, entity_id ASC\nLIMIT ?")
 	args = append(args, limit)
 
 	rows, err := st.conn.Query(ctx, sb.String(), args...)
@@ -794,6 +848,117 @@ WHERE tenant = ?
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// coEngagedFromRollup serves CoEngaged from the precomputed item_pairs table.
+func (st *Store) coEngagedFromRollup(ctx context.Context, tenant string, ref EntityRef, opts CoEngagedOptions, limit int) ([]CoEngagedHit, error) {
+	var sb strings.Builder
+	args := []any{tenant, ref.EntityType, ref.EntityID}
+	fmt.Fprintf(&sb, `SELECT entity_type_b, entity_id_b, max(strength) AS s
+FROM %s.item_pairs
+WHERE tenant = ? AND entity_type_a = ? AND entity_id_a = ?`, st.db)
+	if types := trimAll(opts.EntityTypes); len(types) > 0 {
+		sb.WriteString(" AND entity_type_b IN ?")
+		args = append(args, types)
+	}
+	sb.WriteString("\nGROUP BY entity_type_b, entity_id_b\nHAVING s > 0\nORDER BY s DESC, entity_type_b ASC, entity_id_b ASC\nLIMIT ?")
+	args = append(args, limit)
+	rows, err := st.conn.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("signal: co-engaged rollup: %w", err)
+	}
+	defer rows.Close()
+	out := make([]CoEngagedHit, 0, limit)
+	for rows.Next() {
+		var h CoEngagedHit
+		if err := rows.Scan(&h.EntityType, &h.EntityID, &h.Strength); err != nil {
+			return nil, fmt.Errorf("signal: co-engaged rollup scan: %w", err)
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// RefreshCoEngagement (re)materializes the item_pairs rollup for one tenant:
+// for every subject, the distinct entities they engaged with non-negatively
+// (capped at MaxEntitiesPerSubject) are cross-joined into pairs; pair
+// strength = co-engaged subject count minus subjects who negatively reacted
+// to the candidate. Run it periodically (host-triggered, like worker.SyncOnce).
+func (st *Store) RefreshCoEngagement(ctx context.Context, tenant string, opts RefreshCoEngagementOptions) error {
+	if strings.TrimSpace(tenant) == "" {
+		return fmt.Errorf("signal: tenant is required")
+	}
+	maxPer := opts.MaxEntitiesPerSubject
+	if maxPer <= 0 {
+		maxPer = 100
+	}
+
+	// Clear the previous rollup for this tenant (lightweight delete).
+	if err := st.conn.Exec(ctx, fmt.Sprintf(`DELETE FROM %s.item_pairs WHERE tenant = ?`, st.db), tenant); err != nil {
+		return fmt.Errorf("signal: clear item_pairs: %w", err)
+	}
+
+	var winFrom, winTo string
+	args := []any{tenant}
+	if !opts.Window.From.IsZero() {
+		winFrom = " AND occurred_at >= ?"
+		args = append(args, opts.Window.From.UTC())
+	}
+	if !opts.Window.To.IsZero() {
+		winTo = " AND occurred_at <= ?"
+		args = append(args, opts.Window.To.UTC())
+	}
+
+	// Per subject: pos = entities with non-negative net value, neg = entities
+	// with negative net value. Anchors (a) come from pos only; candidates (b)
+	// carry +1 when the subject engaged positively and -1 when negatively, so
+	// pair strength nets out dislikes.
+	q := fmt.Sprintf(`INSERT INTO %[1]s.item_pairs
+(tenant, entity_type_a, entity_id_a, entity_type_b, entity_id_b, strength, refreshed_at)
+SELECT
+    '%[2]s' AS tenant,
+    a.1 AS entity_type_a, a.2 AS entity_id_a,
+    (bs.1).1 AS entity_type_b, (bs.1).2 AS entity_id_b,
+    toInt64(sum(bs.2)) AS strength,
+    now()
+FROM (
+    SELECT arrayJoin(pos) AS a, arrayJoin(bsigned) AS bs
+    FROM (
+        SELECT
+            pos,
+            arrayConcat(
+                arrayMap(x -> (x, 1), pos),
+                arrayMap(x -> (x, -1), neg)
+            ) AS bsigned
+        FROM (
+            SELECT
+                subject_kind, subject,
+                groupUniqArrayIf(%[3]d)((entity_type, entity_id), net_v >= 0) AS pos,
+                groupUniqArrayIf(%[3]d)((entity_type, entity_id), net_v < 0) AS neg
+            FROM (
+                SELECT subject_kind, subject, entity_type, entity_id, sum(value) AS net_v
+                FROM %[1]s.signal_events
+                WHERE tenant = ?%[4]s%[5]s
+                GROUP BY subject_kind, subject, entity_type, entity_id
+            )
+            GROUP BY subject_kind, subject
+        )
+    )
+)
+WHERE a != bs.1
+GROUP BY entity_type_a, entity_id_a, entity_type_b, entity_id_b
+HAVING strength > 0`, st.db, escapeCHString(tenant), maxPer, winFrom, winTo)
+
+	if err := st.conn.Exec(ctx, q, args...); err != nil {
+		return fmt.Errorf("signal: refresh co-engagement: %w", err)
+	}
+	return nil
+}
+
+// escapeCHString escapes a string for inline use in a ClickHouse literal.
+func escapeCHString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, `'`, `\'`)
 }
 
 func sortedKeys[V any](m map[string]V) []string {

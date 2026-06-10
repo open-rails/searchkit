@@ -183,6 +183,10 @@ type Personalization struct {
 	SeenPenalty float32
 	// CompletedPenalty multiplies completed scores (default 0.6).
 	CompletedPenalty float32
+	// DislikePenalty multiplies entities the subject has net-negative
+	// explicit feedback for (default 0.3). Always applied when view context
+	// is loaded (i.e. AffinityWeight > 0 or DemoteSeen).
+	DislikePenalty float32
 }
 
 // HubSearchOptions extends content SearchOptions with optional
@@ -215,6 +219,9 @@ func (h *EmbeddedHub) Search(ctx context.Context, userText string, opts HubSearc
 	}
 	if p.CompletedPenalty <= 0 {
 		p.CompletedPenalty = 0.6
+	}
+	if p.DislikePenalty <= 0 {
+		p.DislikePenalty = 0.3
 	}
 
 	limit := opts.Limit
@@ -287,15 +294,20 @@ func (h *EmbeddedHub) Search(ctx context.Context, userText string, opts HubSearc
 	for _, f := range fused {
 		score := f.Score
 		if st, ok := states[signal.EntityRef{EntityType: f.EntityType, EntityID: f.EntityID}]; ok {
-			if p.AffinityWeight > 0 && st.LastScore > 0 {
-				score *= 1 + p.AffinityWeight*float32(st.LastScore)/100
-			}
-			if p.DemoteSeen {
-				switch {
-				case st.Completed:
-					score *= p.CompletedPenalty
-				case st.Seen:
-					score *= p.SeenPenalty
+			if st.NetValue < 0 {
+				// Explicit negative feedback outranks every other adjustment.
+				score *= p.DislikePenalty
+			} else {
+				if p.AffinityWeight > 0 && st.LastScore > 0 {
+					score *= 1 + p.AffinityWeight*float32(st.LastScore)/100
+				}
+				if p.DemoteSeen {
+					switch {
+					case st.Completed:
+						score *= p.CompletedPenalty
+					case st.Seen:
+						score *= p.SeenPenalty
+					}
 				}
 			}
 		}
@@ -341,8 +353,13 @@ type HubSimilarOptions struct {
 	// CoEngagementWindow bounds the co-engagement scan (default all time).
 	CoEngagementWindow signal.Window
 
-	// ExcludeSeenFor drops entities this subject has already seen.
+	// ExcludeSeenFor drops entities this subject has already seen (and
+	// always drops entities they negatively reacted to).
 	ExcludeSeenFor *signal.Subject
+
+	// DiversityLambda enables MMR diversity over the fused list ((0,1),
+	// higher = more relevance). 0 disables.
+	DiversityLambda float32
 }
 
 func (h *EmbeddedHub) SimilarTo(ctx context.Context, entityType, entityID string, opts HubSimilarOptions) ([]RecHit, error) {
@@ -425,7 +442,16 @@ func (h *EmbeddedHub) SimilarTo(ctx context.Context, entityType, entityID string
 		}
 	}
 
-	out := make([]RecHit, 0, limit)
+	var negative map[signal.EntityRef]struct{}
+	if opts.ExcludeSeenFor != nil && h.store != nil {
+		neg, err := h.store.NegativeIDs(ctx, h.tenant, *opts.ExcludeSeenFor, opts.EntityTypes)
+		if err != nil {
+			return nil, err
+		}
+		negative = neg
+	}
+
+	candidates := make([]RecHit, 0, len(fused))
 	for _, f := range fused {
 		if f.EntityType == entityType && f.EntityID == entityID {
 			continue // drop the anchor
@@ -435,12 +461,30 @@ func (h *EmbeddedHub) SimilarTo(ctx context.Context, entityType, entityID string
 				continue
 			}
 		}
-		out = append(out, RecHit{EntityType: f.EntityType, EntityID: f.EntityID, Score: f.Score})
-		if len(out) >= limit {
-			break
+		if negative != nil {
+			if _, ok := negative[signal.EntityRef{EntityType: f.EntityType, EntityID: f.EntityID}]; ok {
+				continue
+			}
 		}
+		candidates = append(candidates, RecHit{EntityType: f.EntityType, EntityID: f.EntityID, Score: f.Score})
 	}
-	return out, nil
+	if opts.DiversityLambda > 0 {
+		candidates = h.diversifyRecHits(ctx, candidates, opts.DiversityLambda, model, opts.Language)
+	}
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	return candidates, nil
+}
+
+// RefreshCoEngagement (re)materializes the item_pairs co-engagement rollup
+// for this tenant (see signal.Store.RefreshCoEngagement). Run periodically.
+func (h *EmbeddedHub) RefreshCoEngagement(ctx context.Context, opts signal.RefreshCoEngagementOptions) error {
+	store, err := h.requireStore()
+	if err != nil {
+		return err
+	}
+	return store.RefreshCoEngagement(ctx, h.tenant, opts)
 }
 
 // --- Signal plane ---

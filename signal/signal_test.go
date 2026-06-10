@@ -169,7 +169,7 @@ func TestStatesGroupsRefsByType(t *testing.T) {
 	now := time.Now().UTC()
 	fc := &fakeConn{rowsFor: map[string][][]any{
 		"signal_state": {
-			{"gallery", "7", now, now, uint32(2), uint32(5), uint32(20), false, "p:5", true, int16(40)},
+			{"gallery", "7", now, now, uint32(2), uint32(5), uint32(20), false, "p:5", true, int16(40), float64(0)},
 		},
 	}}
 	st, _ := NewStore(fc, "hub")
@@ -276,8 +276,8 @@ func TestEnsureSchemaValidation(t *testing.T) {
 	if err := EnsureSchema(ctx, fc, SchemaOptions{Database: "hub"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(fc.execs) != 5 { // db + 3 tables + mv
-		t.Fatalf("expected 5 DDL statements, got %d", len(fc.execs))
+	if len(fc.execs) != 7 { // db + 3 tables + net_value alter + item_pairs + mv
+		t.Fatalf("expected 7 DDL statements, got %d", len(fc.execs))
 	}
 	for _, e := range fc.execs {
 		if strings.Contains(e.query, "ON CLUSTER") || strings.Contains(e.query, "Replicated") {
@@ -305,9 +305,16 @@ func TestCoEngagedExcludesAnchor(t *testing.T) {
 	if _, err := st.CoEngaged(context.Background(), "t", EntityRef{EntityType: "gallery", EntityID: "9"}, CoEngagedOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	q := fc.queries[0].query
+	// Empty rollup -> falls back to the event scan (second query).
+	if len(fc.queries) != 2 || !strings.Contains(fc.queries[0].query, "item_pairs") {
+		t.Fatalf("co-engaged must try the rollup first, got %d queries", len(fc.queries))
+	}
+	q := fc.queries[1].query
 	if !strings.Contains(q, "NOT (entity_type = ? AND entity_id = ?)") {
 		t.Fatalf("co-engaged must exclude the anchor:\n%s", q)
+	}
+	if !strings.Contains(q, "value >= 0") || !strings.Contains(q, "HAVING strength > 0") {
+		t.Fatalf("co-engaged strength must be negative-aware:\n%s", q)
 	}
 }
 

@@ -116,10 +116,14 @@ SETTINGS index_granularity = 8192`, db, onCluster, engine("ReplacingMergeTree", 
     resume String DEFAULT '',
     has_interacted Bool DEFAULT false,
     last_score Int16 DEFAULT 0,
+    net_value Float64 DEFAULT 0,
     last_updated DateTime64(3, 'UTC') DEFAULT now64(3)
 ) ENGINE = %s
 ORDER BY (tenant, subject_kind, subject, entity_type, entity_id)
 SETTINGS index_granularity = 8192`, db, onCluster, engine("ReplacingMergeTree", "last_updated")),
+
+		// Idempotent column addition for deployments created before net_value.
+		fmt.Sprintf(`ALTER TABLE %s.signal_state%s ADD COLUMN IF NOT EXISTS net_value Float64 DEFAULT 0 AFTER last_score`, db, onCluster),
 
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.entity_daily%s (
     tenant LowCardinality(String),
@@ -137,6 +141,18 @@ SETTINGS index_granularity = 8192`, db, onCluster, engine("ReplacingMergeTree", 
 PARTITION BY toYear(day)
 ORDER BY (tenant, entity_type, entity_id, day)
 SETTINGS index_granularity = 8192`, db, onCluster, engine("AggregatingMergeTree", "")),
+
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.item_pairs%s (
+    tenant LowCardinality(String),
+    entity_type_a LowCardinality(String),
+    entity_id_a String,
+    entity_type_b LowCardinality(String),
+    entity_id_b String,
+    strength Int64,
+    refreshed_at DateTime('UTC') DEFAULT now()
+) ENGINE = %s
+ORDER BY (tenant, entity_type_a, entity_id_a, entity_type_b, entity_id_b)
+SETTINGS index_granularity = 8192`, db, onCluster, engine("ReplacingMergeTree", "refreshed_at")),
 
 		fmt.Sprintf(`CREATE MATERIALIZED VIEW IF NOT EXISTS %s.mv_entity_daily%s TO %s.entity_daily AS
 SELECT
