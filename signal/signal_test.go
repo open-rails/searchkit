@@ -310,3 +310,45 @@ func TestCoEngagedExcludesAnchor(t *testing.T) {
 		t.Fatalf("co-engaged must exclude the anchor:\n%s", q)
 	}
 }
+
+func TestRecordSignalsBatch(t *testing.T) {
+	fc := &fakeConn{}
+	st, _ := NewStore(fc, "hub")
+	at := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	mk := func(entityType, id string) Signal {
+		return Signal{
+			EntityRef:  EntityRef{EntityType: entityType, EntityID: id},
+			Subject:    Subject{UserID: "u1"},
+			Type:       "view",
+			OccurredAt: at,
+		}
+	}
+	err := st.RecordSignals(context.Background(), "t", []Signal{
+		mk("gallery", "g1"), mk("artist", "a1"), mk("tag", "t1"), mk("tag", "t2"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.execs) != 2 {
+		t.Fatalf("batch must be 2 statements (insert + grouped reprojection), got %d", len(fc.execs))
+	}
+	if c := strings.Count(fc.execs[0].query, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"); c != 4 {
+		t.Fatalf("expected 4 value rows, got %d:\n%s", c, fc.execs[0].query)
+	}
+	proj := fc.execs[1]
+	if !strings.Contains(proj.query, "(entity_type, entity_id, subject_kind, subject) IN ((?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?))") {
+		t.Fatalf("grouped reprojection must cover all 4 keys:\n%s", proj.query)
+	}
+
+	// Empty batch is a no-op; single falls through to RecordSignal.
+	fc.execs = nil
+	if err := st.RecordSignals(context.Background(), "t", nil); err != nil || len(fc.execs) != 0 {
+		t.Fatalf("empty batch: %v %d", err, len(fc.execs))
+	}
+	if err := st.RecordSignals(context.Background(), "t", []Signal{mk("gallery", "g9")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fc.execs) != 2 || !strings.Contains(fc.execs[1].query, "entity_id = ?") {
+		t.Fatalf("single-signal batch should use the point reprojection path")
+	}
+}

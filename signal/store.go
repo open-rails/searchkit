@@ -84,6 +84,97 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, st.db)
 	return st.reprojectState(ctx, tenant, s.Subject, s.EntityRef)
 }
 
+// RecordSignals appends a batch of events and reprojects current-state for
+// every touched (subject, entity) key — ONE multi-row event insert plus ONE
+// grouped reprojection, regardless of batch size. Use this when a single
+// user action fans out into several signals (e.g. a gallery view that also
+// signals its artists/series/tags).
+func (st *Store) RecordSignals(ctx context.Context, tenant string, signals []Signal) error {
+	if strings.TrimSpace(tenant) == "" {
+		return fmt.Errorf("signal: tenant is required")
+	}
+	if len(signals) == 0 {
+		return nil
+	}
+	if len(signals) == 1 {
+		return st.RecordSignal(ctx, tenant, signals[0])
+	}
+
+	now := time.Now().UTC()
+	args := make([]any, 0, len(signals)*18)
+	type stateKey struct {
+		entityType, entityID, subjectKind, subject string
+	}
+	touched := map[stateKey]struct{}{}
+	rows := make([]string, 0, len(signals))
+	for i := range signals {
+		s := signals[i]
+		if err := s.validate(); err != nil {
+			return err
+		}
+		if s.OccurredAt.IsZero() {
+			s.OccurredAt = now
+		}
+		if s.Weight == 0 {
+			s.Weight = 1
+		}
+		payload := ""
+		if len(s.Payload) > 0 {
+			b, err := json.Marshal(s.Payload)
+			if err != nil {
+				return fmt.Errorf("signal: marshal payload: %w", err)
+			}
+			payload = string(b)
+		}
+		rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			tenant, s.EntityType, s.EntityID, s.Subject.Kind(), s.Subject.Key(),
+			s.Type, s.eventID(), s.OccurredAt.UTC(),
+			s.DurationS, s.Progress, s.ProgressMax, s.Value, s.Label, s.Weight,
+			s.Score, s.Completed, s.Resume, payload,
+		)
+		touched[stateKey{s.EntityType, s.EntityID, s.Subject.Kind(), s.Subject.Key()}] = struct{}{}
+	}
+
+	insert := fmt.Sprintf(`INSERT INTO %s.signal_events
+(tenant, entity_type, entity_id, subject_kind, subject, signal_type, event_id, occurred_at,
+ duration_s, progress, progress_max, value, label, weight, score, completed, resume, payload)
+VALUES %s`, st.db, strings.Join(rows, ", "))
+	if err := st.conn.Exec(ctx, insert, args...); err != nil {
+		return fmt.Errorf("signal: insert events: %w", err)
+	}
+
+	// One grouped reprojection over every touched key.
+	keyTuples := make([]string, 0, len(touched))
+	keyArgs := []any{tenant}
+	for k := range touched {
+		keyTuples = append(keyTuples, "(?, ?, ?, ?)")
+		keyArgs = append(keyArgs, k.entityType, k.entityID, k.subjectKind, k.subject)
+	}
+	q := fmt.Sprintf(`INSERT INTO %s.signal_state
+(tenant, subject_kind, subject, entity_type, entity_id, first_seen_at, last_signal_at,
+ total_events, max_progress, progress_max, completed, resume, has_interacted, last_score, last_updated)
+SELECT
+    tenant, subject_kind, subject, entity_type, entity_id,
+    min(occurred_at),
+    max(occurred_at),
+    toUInt32(uniqExact(event_id)),
+    max(progress),
+    max(progress_max),
+    max(completed),
+    argMaxIf(resume, occurred_at, resume != ''),
+    max(value != 0 OR label != ''),
+    argMax(score, occurred_at),
+    now64(3)
+FROM %s.signal_events
+WHERE tenant = ? AND (entity_type, entity_id, subject_kind, subject) IN (%s)
+GROUP BY tenant, subject_kind, subject, entity_type, entity_id`, st.db, st.db, strings.Join(keyTuples, ", "))
+	if err := st.conn.Exec(ctx, q, keyArgs...); err != nil {
+		return fmt.Errorf("signal: reproject states: %w", err)
+	}
+	return nil
+}
+
 // reprojectState recomputes the current-state row for one (subject, entity)
 // key by aggregating its events. Deterministic and replay-idempotent:
 // total_events deduplicates by event_id, the rest are min/max/argMax.

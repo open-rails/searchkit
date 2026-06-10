@@ -419,3 +419,61 @@ func TestIntegrationCoEngaged(t *testing.T) {
 		t.Fatalf("Z should follow with strength 1: %+v", co)
 	}
 }
+
+func TestIntegrationRecordSignalsFanOut(t *testing.T) {
+	st, _ := freshStore(t)
+	ctx := context.Background()
+	tenant := "t"
+	user := Subject{UserID: "u1"}
+
+	mk := func(entityType, id string, weight float64) Signal {
+		return Signal{
+			EntityRef:  EntityRef{EntityType: entityType, EntityID: id},
+			Subject:    user,
+			Type:       "view",
+			OccurredAt: at(5, 12),
+			Progress:   10, ProgressMax: 20,
+			Weight: weight,
+		}
+	}
+	batch := []Signal{
+		mk("gallery", "g1", 1),
+		mk("artist", "a1", 0.25),
+		mk("series", "s1", 0.25),
+		mk("tag", "t1", 0.25),
+		mk("tag", "t2", 0.25),
+	}
+	if err := st.RecordSignals(ctx, tenant, batch); err != nil {
+		t.Fatal(err)
+	}
+	// Replay the whole batch: state must converge, not double-count.
+	if err := st.RecordSignals(ctx, tenant, batch); err != nil {
+		t.Fatal(err)
+	}
+
+	states, err := st.States(ctx, tenant, user, []EntityRef{
+		{EntityType: "gallery", EntityID: "g1"},
+		{EntityType: "artist", EntityID: "a1"},
+		{EntityType: "tag", EntityID: "t2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 3 {
+		t.Fatalf("expected 3 states, got %v", states)
+	}
+	for ref, s := range states {
+		if s.TotalEvents != 1 || s.MaxProgress != 10 {
+			t.Fatalf("%v: replayed batch double-counted: %+v", ref, s)
+		}
+	}
+
+	// Fan-out powers per-type popularity.
+	pop, err := st.Popular(ctx, tenant, "tag", PopularOptions{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pop) != 2 {
+		t.Fatalf("tag popularity from fan-out: %+v", pop)
+	}
+}

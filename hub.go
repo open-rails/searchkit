@@ -465,6 +465,32 @@ func (h *EmbeddedHub) RecordSignal(ctx context.Context, s signal.Signal) error {
 	return store.RecordSignal(ctx, h.tenant, s)
 }
 
+// RecordSignals records a batch of signals in two ClickHouse statements
+// total (one event insert, one grouped state reprojection). Use when one
+// user action fans out into several signals. Each signal's entity type
+// Scorer is applied as in RecordSignal.
+func (h *EmbeddedHub) RecordSignals(ctx context.Context, signals []signal.Signal) error {
+	store, err := h.requireStore()
+	if err != nil {
+		return err
+	}
+	out := make([]signal.Signal, 0, len(signals))
+	for _, s := range signals {
+		if scorer, ok := h.scorers[s.EntityType]; ok && scorer != nil {
+			scored, err := scorer.Score(ctx, s)
+			if err != nil {
+				return fmt.Errorf("searchkit: scorer for %q: %w", s.EntityType, err)
+			}
+			s.Score = scored.Score
+			s.Progress = scored.Progress
+			s.ProgressMax = scored.ProgressMax
+			s.Completed = scored.Completed
+		}
+		out = append(out, s)
+	}
+	return store.RecordSignals(ctx, h.tenant, out)
+}
+
 // --- Discovery plane ---
 
 func (h *EmbeddedHub) History(ctx context.Context, subject signal.Subject, opts signal.HistoryOptions) ([]signal.StateRow, error) {
