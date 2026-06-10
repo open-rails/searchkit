@@ -501,6 +501,26 @@ func (h *EmbeddedHub) History(ctx context.Context, subject signal.Subject, opts 
 	return store.History(ctx, h.tenant, subject, opts)
 }
 
+// HistoryCount returns the total row count History would paginate over.
+func (h *EmbeddedHub) HistoryCount(ctx context.Context, subject signal.Subject, opts signal.HistoryOptions) (int64, error) {
+	store, err := h.requireStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.HistoryCount(ctx, h.tenant, subject, opts)
+}
+
+// SeenIDs returns the subject's seen-set for one entity type (the signal-plane
+// half of the unseen anti-join). Use when the host wants to run its own diff
+// against a custom-filtered universe instead of Unseen's registered catalog.
+func (h *EmbeddedHub) SeenIDs(ctx context.Context, subject signal.Subject, entityType string) (map[string]struct{}, error) {
+	store, err := h.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.SeenIDs(ctx, h.tenant, subject, entityType)
+}
+
 // UnseenOptions controls Unseen reads.
 type UnseenOptions struct {
 	// EntityType selects which catalog universe to diff against. Required.

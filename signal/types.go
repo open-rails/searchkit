@@ -210,8 +210,11 @@ type HistoryOptions struct {
 	// EntityType limits results to one entity type. Empty = all types.
 	EntityType string
 	Status     HistoryStatus
-	Limit      int // default 50
-	Offset     int
+	// Since drops rows whose last signal is older (e.g. host "clear history
+	// before X" features). Zero = no lower bound.
+	Since  time.Time
+	Limit  int // default 50
+	Offset int
 }
 
 // EntityEngagement aggregates signal quality for one entity —

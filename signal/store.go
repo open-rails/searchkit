@@ -303,6 +303,10 @@ WHERE tenant = ? AND subject_kind = ? AND subject = ?`, stateColumns, st.db)
 	default:
 		return nil, fmt.Errorf("signal: invalid HistoryOptions.Status %q", opts.Status)
 	}
+	if !opts.Since.IsZero() {
+		sb.WriteString(" AND last_signal_at >= ?")
+		args = append(args, opts.Since.UTC())
+	}
 	sb.WriteString(" ORDER BY last_signal_at DESC, entity_type ASC, entity_id ASC LIMIT ? OFFSET ?")
 	args = append(args, limit, opts.Offset)
 
@@ -320,6 +324,49 @@ WHERE tenant = ? AND subject_kind = ? AND subject = ?`, stateColumns, st.db)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// HistoryCount returns the total row count History would paginate over.
+func (st *Store) HistoryCount(ctx context.Context, tenant string, subject Subject, opts HistoryOptions) (int64, error) {
+	if err := subject.Validate(); err != nil {
+		return 0, err
+	}
+	var sb strings.Builder
+	args := []any{tenant, subject.Kind(), subject.Key()}
+	fmt.Fprintf(&sb, `SELECT toInt64(count())
+FROM %s.signal_state FINAL
+WHERE tenant = ? AND subject_kind = ? AND subject = ?`, st.db)
+	if t := strings.TrimSpace(opts.EntityType); t != "" {
+		sb.WriteString(" AND entity_type = ?")
+		args = append(args, t)
+	}
+	switch opts.Status {
+	case HistoryAny:
+	case HistorySeen:
+		sb.WriteString(" AND max_progress > 0")
+	case HistoryInProgress:
+		sb.WriteString(" AND max_progress > 0 AND NOT completed")
+	case HistoryCompleted:
+		sb.WriteString(" AND completed")
+	default:
+		return 0, fmt.Errorf("signal: invalid HistoryOptions.Status %q", opts.Status)
+	}
+	if !opts.Since.IsZero() {
+		sb.WriteString(" AND last_signal_at >= ?")
+		args = append(args, opts.Since.UTC())
+	}
+	rows, err := st.conn.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return 0, fmt.Errorf("signal: history count: %w", err)
+	}
+	defer rows.Close()
+	var n int64
+	if rows.Next() {
+		if err := rows.Scan(&n); err != nil {
+			return 0, fmt.Errorf("signal: history count scan: %w", err)
+		}
+	}
+	return n, rows.Err()
 }
 
 // SeenIDs returns the subject's seen-set for one entity type: entity ids with
