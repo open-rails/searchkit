@@ -233,11 +233,6 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 	return out, rows.Err()
 }
 
-// SearchVectors is a legacy alias for SemanticSearch.
-func SearchVectors(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, error) {
-	return SemanticSearch(ctx, pool, q)
-}
-
 // SimilarTo returns nearest neighbors to an existing stored vector for the same
 // model, excluding the source entity itself.
 func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityType string, entityID string, model string, language string, limit int, opts Options) ([]Hit, error) {

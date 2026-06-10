@@ -60,7 +60,7 @@ Planned contract:
 
 ## Candidate generation
 
-- `search.SearchVectors(...)` performs KNN candidate generation from stored
+- `search.SemanticSearch(...)` performs KNN candidate generation from stored
   vectors.
 - `search.SimilarTo(...)` finds nearest neighbors of an existing stored vector.
 
