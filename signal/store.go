@@ -512,6 +512,37 @@ WHERE tenant = ? AND entity_type = ? AND entity_id = ?`, st.db)
 	return e, rows.Err()
 }
 
+// SubjectCounts returns unique-subject counts (all-time) for a fixed set of
+// entity ids of one type — the bulk "view count per card" read, served from
+// the daily rollup.
+func (st *Store) SubjectCounts(ctx context.Context, tenant string, entityType string, ids []string) (map[string]uint64, error) {
+	out := map[string]uint64{}
+	ids = trimAll(ids)
+	if strings.TrimSpace(entityType) == "" || len(ids) == 0 {
+		return out, nil
+	}
+	q := fmt.Sprintf(`SELECT entity_id, uniqExactMerge(subjects)
+FROM %s.entity_daily
+WHERE tenant = ? AND entity_type = ? AND entity_id IN ?
+GROUP BY entity_id`, st.db)
+	rows, err := st.conn.Query(ctx, q, tenant, entityType, ids)
+	if err != nil {
+		return nil, fmt.Errorf("signal: subject counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id string
+			n  uint64
+		)
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("signal: subject counts scan: %w", err)
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // Popular ranks entities of one type over a time window. Day-aligned windows
 // (and all-time) merge the tiny entity_daily rollup; sub-day windows scan the
 // month-partitioned event stream.

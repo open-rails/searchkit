@@ -644,6 +644,16 @@ func (h *EmbeddedHub) Popular(ctx context.Context, entityType string, opts signa
 	return store.Popular(ctx, h.tenant, entityType, opts)
 }
 
+// SubjectCounts returns all-time unique-subject counts for entity ids of one
+// type (bulk per-card view counts).
+func (h *EmbeddedHub) SubjectCounts(ctx context.Context, entityType string, ids []string) (map[string]uint64, error) {
+	store, err := h.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.SubjectCounts(ctx, h.tenant, entityType, ids)
+}
+
 // PopularityFor scores a fixed candidate set (entity ids of one type) by the
 // popularity ranking, returning entity_id -> score. Use to rank a host-
 // filtered universe (e.g. "galleries of artist X by popularity").
