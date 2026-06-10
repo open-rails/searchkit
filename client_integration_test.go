@@ -22,14 +22,15 @@ func TestClientSearch_Integration_LexicalAndSemantic(t *testing.T) {
 	}
 	defer pool.Close()
 
-	// Minimal schema setup for FTS + semantic search.
+	// Minimal schema setup for trigram + FTS + semantic search. Dropped and
+	// recreated so the shape always matches what the search paths expect.
 	_, err = pool.Exec(ctx, `
-		CREATE SCHEMA IF NOT EXISTS s;
-		SET search_path = s, public;
+		DROP SCHEMA IF EXISTS s CASCADE;
+		CREATE SCHEMA s;
 		CREATE EXTENSION IF NOT EXISTS pg_trgm;
 		CREATE EXTENSION IF NOT EXISTS vector;
 
-		CREATE OR REPLACE FUNCTION searchkit_regconfig_for_language(lang text)
+		CREATE OR REPLACE FUNCTION s.searchkit_regconfig_for_language(lang text)
 		RETURNS regconfig
 		LANGUAGE sql
 		IMMUTABLE
@@ -37,10 +38,11 @@ func TestClientSearch_Integration_LexicalAndSemantic(t *testing.T) {
 			SELECT 'simple'::regconfig
 		$$;
 
-		CREATE TABLE IF NOT EXISTS search_documents (
+		CREATE TABLE s.search_documents (
 			entity_type text NOT NULL,
 			entity_id text NOT NULL,
 			language text NOT NULL,
+			document text,
 			raw_document text,
 			tsv tsvector,
 			created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -48,7 +50,7 @@ func TestClientSearch_Integration_LexicalAndSemantic(t *testing.T) {
 			PRIMARY KEY (entity_type, entity_id, language)
 		);
 
-		CREATE TABLE IF NOT EXISTS embedding_vectors (
+		CREATE TABLE s.embedding_vectors (
 			entity_type text NOT NULL,
 			entity_id text NOT NULL,
 			model text NOT NULL,
@@ -58,24 +60,24 @@ func TestClientSearch_Integration_LexicalAndSemantic(t *testing.T) {
 			updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (entity_type, entity_id, model, language)
 		);
-
-		TRUNCATE TABLE search_documents;
-		TRUNCATE TABLE embedding_vectors;
 	`)
 	if err != nil {
 		t.Fatalf("setup: %v", err)
 	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DROP SCHEMA IF EXISTS s CASCADE")
+	})
 
 	_, err = pool.Exec(ctx, `
-		INSERT INTO s.search_documents(entity_type, entity_id, language, raw_document, tsv)
-		VALUES ('gallery', '1', 'en', 'Two factor authentication', to_tsvector(searchkit_regconfig_for_language('en'), 'Two factor authentication'))
+		INSERT INTO s.search_documents(entity_type, entity_id, language, document, raw_document, tsv)
+		VALUES ('gallery', '1', 'en', lower('Two factor authentication'), 'Two factor authentication', to_tsvector(s.searchkit_regconfig_for_language('en'), 'Two factor authentication'))
 	`)
 	if err != nil {
 		t.Fatalf("insert search_documents: %v", err)
 	}
 	_, err = pool.Exec(ctx, `
-		INSERT INTO s.search_documents(entity_type, entity_id, language, raw_document, tsv)
-		VALUES ('gallery', '2', 'en', 'Two factor backup codes', to_tsvector(searchkit_regconfig_for_language('en'), 'Two factor backup codes'))
+		INSERT INTO s.search_documents(entity_type, entity_id, language, document, raw_document, tsv)
+		VALUES ('gallery', '2', 'en', lower('Two factor backup codes'), 'Two factor backup codes', to_tsvector(s.searchkit_regconfig_for_language('en'), 'Two factor backup codes'))
 	`)
 	if err != nil {
 		t.Fatalf("insert search_documents 2: %v", err)

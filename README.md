@@ -16,8 +16,102 @@ This README is a **manual** for host applications. Design notes live in `agents/
 > + signal platform** — search + recommendations + history + "unseen" + engagement — runnable both
 > **embedded** and as a **multi-tenant SaaS server**. Canonical design:
 > [`docs/DESIGN.md`](docs/DESIGN.md), [`docs/signal-plane.md`](docs/signal-plane.md),
-> [`docs/api-surface.md`](docs/api-surface.md). The sections below document the **current** library
-> (still accurate today); the parts being replaced by the new design are flagged inline.
+> [`docs/api-surface.md`](docs/api-surface.md). The **embedded hub** (signal + discovery planes) is
+> implemented — see "The embedded hub" below. The standalone SaaS server is future work.
+
+## The embedded hub (signal + discovery planes)
+
+Beyond search, searchkit can run as an in-process **discovery hub**: it records per-user
+interaction **signals** in ClickHouse and answers id-returning discovery queries — history, unseen,
+view-context annotation, engagement, popularity/trending, personalized search, and
+recommendations. The host hydrates ids → cards from its own DB; searchkit stores no presentation
+data.
+
+**Mechanism vs meaning:** searchkit owns storage/aggregation/queries. Entity types, signal types,
+scoring weights, and completion rules are host-defined data — no business noun appears in the
+schema.
+
+### Setup
+
+The hub needs the existing Postgres content plane plus a **dedicated ClickHouse database**:
+
+```go
+import (
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/open-rails/searchkit"
+	"github.com/open-rails/searchkit/signal"
+)
+
+ch, _ := clickhouse.Open(&clickhouse.Options{Addr: []string{"localhost:9000"}})
+
+// Once at startup (DDL privileges required). Idempotent. Set Cluster for
+// replicated/ON CLUSTER deployments.
+_ = signal.EnsureSchema(ctx, ch, signal.SchemaOptions{Database: "hub"})
+
+hub, _ := searchkit.NewEmbedded(searchkit.EmbeddedConfig{
+	PG:           pgPool,
+	PGSchema:     "hub",          // dedicated schema (NOT the host app schema)
+	Embedder:     embedder,
+	DefaultModel: "qwen3-embedding",
+	CH:           ch,
+	CHDatabase:   "hub",          // dedicated ClickHouse database
+	Tenant:       "myapp",        // single implicit tenant embedded
+	Scorers: map[string]signal.Scorer{
+		// Host-defined: map a raw session to score/progress/completed.
+		"blog_post": blogScorer, // e.g. read-time + scroll depth, completed >= 90%
+	},
+	Catalogs: map[string]searchkit.EntityCatalog{
+		// Host-defined: the "universe" for Unseen, read from YOUR tables
+		// with YOUR visibility/premium gating, newest first.
+		"blog_post": blogCatalog,
+	},
+})
+```
+
+Omitting `CH` runs content-only: search/typeahead work, signal/discovery methods return
+`ErrSignalPlaneDisabled`.
+
+### Recording signals
+
+One summarized event per session/interaction (exit-beacon style — never one row per scroll tick):
+
+```go
+_ = hub.RecordSignal(ctx, signal.Signal{
+	EntityRef:   signal.EntityRef{EntityType: "blog_post", EntityID: "42"},
+	Subject:     signal.Subject{UserID: userID},   // or AnonKey for anonymous
+	Type:        "view",                            // host-defined
+	DurationS:   180,
+	Progress:    95, ProgressMax: 100,              // generic consumption units
+	Resume:      "scroll:95",                       // opaque resume pointer
+})
+```
+
+The registered `Scorer` for the entity type fills `Score`/`Progress`/`ProgressMax`/`Completed`.
+Replayed events (same content or same `EventID`) deduplicate instead of double-counting.
+
+### Discovery reads (all id-returning)
+
+```go
+hist, _ := hub.History(ctx, user, signal.HistoryOptions{EntityType: "blog_post", Status: signal.HistoryInProgress})
+fresh, _ := hub.Unseen(ctx, user, searchkit.UnseenOptions{EntityType: "blog_post", Limit: 20})
+states, _ := hub.States(ctx, user, refs)          // bulk "seen? % read? resume?" for a page of cards
+eng, _   := hub.Engagement(ctx, ref)              // unique subjects, completion rate, avg score
+top, _   := hub.Popular(ctx, "blog_post", signal.PopularOptions{Window: signal.LastDays(30)})
+slice, _ := hub.Popular(ctx, "blog_post", signal.PopularOptions{Window: signal.Between(a, b)}) // arbitrary date slices
+recs, _  := hub.Recommend(ctx, user, searchkit.RecommendOptions{EntityTypes: []string{"blog_post"}})
+```
+
+- `Popular` merges a tiny daily rollup (`entity_daily`) for day-aligned windows and scans raw
+  events for sub-day slices. Default ranking: log-scaled unique subjects × Bayesian-smoothed
+  engagement; tune via `RankWeights` (incl. `HalfLifeDays` time decay) or replace with a trusted
+  `RankExpr`.
+- `Recommend` fuses content similarity (seeded from the subject's high-signal entities) with
+  co-engagement, excludes seen, and falls back to popularity on cold start.
+- `hub.Search(..., HubSearchOptions{Personalize: &searchkit.Personalization{Subject: user, DemoteSeen: true}})`
+  blends candidate popularity into the ranking and demotes seen/completed entities — recall
+  unchanged, ranking only, per-request toggle.
+- `hub.SimilarTo(..., HubSimilarOptions{CoEngagement: true})` fuses vector neighbours with
+  "subjects who engaged with X also engaged with Y".
 
 ## Host app integration (manual)
 
