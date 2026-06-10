@@ -328,6 +328,36 @@ WHERE tenant = ? AND subject_kind = ? AND subject = ?`, stateColumns, st.db)
 	return out, rows.Err()
 }
 
+// Forget erases a subject's signals — for one entity (ref non-nil) or for an
+// entire entity type (ref nil, entityType set) — from both the event stream
+// and the current-state projection. Backs host "clear my history" features
+// (lightweight DELETEs; eventual on replicated tables).
+func (st *Store) Forget(ctx context.Context, tenant string, subject Subject, entityType string, entityID string) error {
+	if err := subject.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(entityType) == "" {
+		return fmt.Errorf("signal: entityType is required")
+	}
+	evWhere := " WHERE tenant = ? AND entity_type = ? AND subject_kind = ? AND subject = ?"
+	stWhere := " WHERE tenant = ? AND subject_kind = ? AND subject = ? AND entity_type = ?"
+	evArgs := []any{tenant, entityType, subject.Kind(), subject.Key()}
+	stArgs := []any{tenant, subject.Kind(), subject.Key(), entityType}
+	if strings.TrimSpace(entityID) != "" {
+		evWhere += " AND entity_id = ?"
+		stWhere += " AND entity_id = ?"
+		evArgs = append(evArgs, entityID)
+		stArgs = append(stArgs, entityID)
+	}
+	if err := st.conn.Exec(ctx, fmt.Sprintf("DELETE FROM %s.signal_events%s", st.db, evWhere), evArgs...); err != nil {
+		return fmt.Errorf("signal: forget events: %w", err)
+	}
+	if err := st.conn.Exec(ctx, fmt.Sprintf("DELETE FROM %s.signal_state%s", st.db, stWhere), stArgs...); err != nil {
+		return fmt.Errorf("signal: forget state: %w", err)
+	}
+	return nil
+}
+
 // HistoryCount returns the total row count History would paginate over.
 func (st *Store) HistoryCount(ctx context.Context, tenant string, subject Subject, opts HistoryOptions) (int64, error) {
 	if err := subject.Validate(); err != nil {

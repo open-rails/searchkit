@@ -545,6 +545,16 @@ func (h *EmbeddedHub) History(ctx context.Context, subject signal.Subject, opts 
 	return store.History(ctx, h.tenant, subject, opts)
 }
 
+// Forget erases the subject's signals for one entity (entityID set) or a
+// whole entity type (entityID empty) — host "clear my history" support.
+func (h *EmbeddedHub) Forget(ctx context.Context, subject signal.Subject, entityType, entityID string) error {
+	store, err := h.requireStore()
+	if err != nil {
+		return err
+	}
+	return store.Forget(ctx, h.tenant, subject, entityType, entityID)
+}
+
 // HistoryCount returns the total row count History would paginate over.
 func (h *EmbeddedHub) HistoryCount(ctx context.Context, subject signal.Subject, opts signal.HistoryOptions) (int64, error) {
 	store, err := h.requireStore()
