@@ -600,6 +600,17 @@ func (h *EmbeddedHub) Popular(ctx context.Context, entityType string, opts signa
 	return store.Popular(ctx, h.tenant, entityType, opts)
 }
 
+// PopularityFor scores a fixed candidate set (entity ids of one type) by the
+// popularity ranking, returning entity_id -> score. Use to rank a host-
+// filtered universe (e.g. "galleries of artist X by popularity").
+func (h *EmbeddedHub) PopularityFor(ctx context.Context, entityType string, ids []string, window signal.Window) (map[string]float64, error) {
+	store, err := h.requireStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.PopularityFor(ctx, h.tenant, entityType, ids, window)
+}
+
 func clampInt(v, lo, hi int) int {
 	if v < lo {
 		return lo
