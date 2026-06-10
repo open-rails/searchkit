@@ -654,14 +654,14 @@ func (h *EmbeddedHub) Popular(ctx context.Context, entityType string, opts signa
 	return store.Popular(ctx, h.tenant, entityType, opts)
 }
 
-// SubjectCounts returns all-time unique-subject counts for entity ids of one
-// type (bulk per-card view counts).
-func (h *EmbeddedHub) SubjectCounts(ctx context.Context, entityType string, ids []string) (map[string]uint64, error) {
+// SubjectCounts returns unique-subject counts for entity ids of one type
+// over a window (zero = all time) — bulk per-card view counts.
+func (h *EmbeddedHub) SubjectCounts(ctx context.Context, entityType string, ids []string, window signal.Window) (map[string]uint64, error) {
 	store, err := h.requireStore()
 	if err != nil {
 		return nil, err
 	}
-	return store.SubjectCounts(ctx, h.tenant, entityType, ids)
+	return store.SubjectCounts(ctx, h.tenant, entityType, ids, window)
 }
 
 // PopularityFor scores a fixed candidate set (entity ids of one type) by the

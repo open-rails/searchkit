@@ -542,20 +542,31 @@ WHERE tenant = ? AND entity_type = ? AND entity_id = ?`, st.db)
 	return e, rows.Err()
 }
 
-// SubjectCounts returns unique-subject counts (all-time) for a fixed set of
-// entity ids of one type — the bulk "view count per card" read, served from
-// the daily rollup.
-func (st *Store) SubjectCounts(ctx context.Context, tenant string, entityType string, ids []string) (map[string]uint64, error) {
+// SubjectCounts returns unique-subject counts for a fixed set of entity ids
+// of one type over a window (zero window = all time) — the bulk "view count
+// per card" read, served from the daily rollup.
+func (st *Store) SubjectCounts(ctx context.Context, tenant string, entityType string, ids []string, window Window) (map[string]uint64, error) {
 	out := map[string]uint64{}
 	ids = trimAll(ids)
 	if strings.TrimSpace(entityType) == "" || len(ids) == 0 {
 		return out, nil
 	}
-	q := fmt.Sprintf(`SELECT entity_id, uniqExactMerge(subjects)
+	var sb strings.Builder
+	args := []any{tenant, entityType, ids}
+	fmt.Fprintf(&sb, `SELECT entity_id, uniqExactMerge(subjects)
 FROM %s.entity_daily
-WHERE tenant = ? AND entity_type = ? AND entity_id IN ?
-GROUP BY entity_id`, st.db)
-	rows, err := st.conn.Query(ctx, q, tenant, entityType, ids)
+WHERE tenant = ? AND entity_type = ? AND entity_id IN ?`, st.db)
+	if !window.From.IsZero() {
+		sb.WriteString(" AND day >= toDate(?)")
+		args = append(args, window.From.UTC())
+	}
+	if !window.To.IsZero() {
+		sb.WriteString(" AND day <= toDate(?)")
+		args = append(args, window.To.UTC())
+	}
+	sb.WriteString("\nGROUP BY entity_id")
+	q := sb.String()
+	rows, err := st.conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("signal: subject counts: %w", err)
 	}
