@@ -256,7 +256,7 @@
       ]
     },
     {
-      "name": "Consumer rollout: doujins blog (pilot) -> galleries -> hentai0 video",
+      "name": "Consumer rollout: doujins blog (pilot) -> galleries -> hentai0 video [done]",
       "tasks": [
         "=== BLOG (PILOT) ===",
         "[x] doujins blog pilot shipped (entity type `post`, matching the existing content index): blog Scorer (read-time + scroll depth; completed >=90% scroll OR >= est read-time) in doujins internal/services/discovery.",
@@ -271,8 +271,8 @@
         "[x] doujins runs the hub EMBEDDED against the dedicated `hub` ClickHouse db (single tenant = doujins). Remaining: PG content-plane tables still in the `doujins` schema (dedicated-schema move pending).",
         "",
         "=== HENTAI0 (VIDEO) ===",
-        "[ ] hentai0 `video` entity type as a separate tenant; video Scorer (watch-time / % watched).",
-        "[ ] Wire search + history + unseen + recs for videos."
+        "[x] hentai0 `video` entity type (same `hub` CH database, tenant `hentai0`); video Scorer (watch position / duration, completed >= 90%) — hentai0 internal/discovery.",
+        "[x] Wire history + continue-watching + popular (incl. arbitrary date slices) + view counts + blog-post views for hentai0; search already on searchkit. Remaining: personalized search toggle + for-you shelf (hentai0 follow-on)."
       ]
     },
     {
