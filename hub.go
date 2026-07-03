@@ -73,7 +73,7 @@ type Hub interface {
 }
 
 // EmbeddedHub implements the full Hub surface; a future remote client must
-// too (cross-mode conformance, see agents/future.json). Embedded-only
+// too (cross-mode conformance, see open-rails-tracker/searchkit/future.md). Embedded-only
 // extras like Client() are deliberately NOT part of the interface.
 var _ Hub = (*EmbeddedHub)(nil)
 

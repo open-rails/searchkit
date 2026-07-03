@@ -8,9 +8,9 @@
 >
 > Companion docs: [signal-plane.md](signal-plane.md) (the new per-user layer),
 > [api-surface.md](api-surface.md) (the unified interface). Implementation notes live in
-> [../agents/NOTES.md](../agents/NOTES.md); the embedded work breakdown is in
-> [../agents/progress.json](../agents/progress.json), and the standalone/SaaS plans in
-> [../agents/future.json](../agents/future.json).
+> [../../open-rails-tracker/searchkit/NOTES.md](../../open-rails-tracker/searchkit/NOTES.md); the embedded work breakdown is in
+> [../../open-rails-tracker/searchkit/progress.md](../../open-rails-tracker/searchkit/progress.md), and the standalone/SaaS plans in
+> [../../open-rails-tracker/searchkit/future.md](../../open-rails-tracker/searchkit/future.md).
 
 ## 1. What searchkit is today
 
@@ -94,7 +94,7 @@ Each entity type a host registers (e.g. `gallery`, `blog_post`, `video`, `track`
 
 One **transport-agnostic core** behind **one Go interface** (see [api-surface.md](api-surface.md));
 only the constructor differs. **Embedded is the immediate scope; the standalone server is future**
-(see [../agents/future.json](../agents/future.json)).
+(see [../../open-rails-tracker/searchkit/future.md](../../open-rails-tracker/searchkit/future.md)).
 
 - **Embedded library (now)** — host builds the core with its own DB pools and calls it in-process
   (`NewEmbedded(...)`), as `searchkit.NewClient` does today. It runs against the **shared DB** (a
@@ -123,12 +123,12 @@ fastest and duplicates nothing.
   data stays in the host's DB. The signal plane is push by nature (`RecordSignal`).
 - **Standalone (later):** a server can't call back into the host's Go funcs, so it switches to **push
   ingestion** — the host `UpsertEntity(...)`s lexical/semantic text + facets (+ optional render
-  payload). See [../agents/future.json](../agents/future.json). The worker (`search_dirty` → backfill
+  payload). See [../../open-rails-tracker/searchkit/future.md](../../open-rails-tracker/searchkit/future.md). The worker (`search_dirty` → backfill
   → `embedding_tasks`) is unchanged; only how it's fed differs.
 
 ## 7. Tenancy & SaaS
 
-> Multi-tenant server mode is **future** ([../agents/future.json](../agents/future.json)); the
+> Multi-tenant server mode is **future** ([../../open-rails-tracker/searchkit/future.md](../../open-rails-tracker/searchkit/future.md)); the
 > embedded library is **single-tenant** now. The `tenant_id` column exists even embedded (one value)
 > so the two share code.
 
@@ -179,8 +179,8 @@ The hub spans two stores; the goal is to unify the **API**, not the storage.
 
 ## 9. Phased rollout
 
-The embedded work breakdown lives in [../agents/progress.json](../agents/progress.json); the
-standalone/SaaS plans in [../agents/future.json](../agents/future.json). Sequencing rationale:
+The embedded work breakdown lives in [../../open-rails-tracker/searchkit/progress.md](../../open-rails-tracker/searchkit/progress.md); the
+standalone/SaaS plans in [../../open-rails-tracker/searchkit/future.md](../../open-rails-tracker/searchkit/future.md). Sequencing rationale:
 history/unseen/engagement are nearly free off the signal plane and immediately useful; personalized
 search and collaborative recommendations are the heavy lifts and come **after** the substrate is
 proven across ≥2 consumers.
