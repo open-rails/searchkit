@@ -1,14 +1,23 @@
--- searchkit: Postgres schema for lexical + semantic search (single migration).
+-- searchkit: Postgres schema for lexical + semantic search — consolidated
+-- baseline (squashed from 001..003, 2026-07-07).
 --
 -- IMPORTANT: this intentionally follows River's pattern: create tables in the
--- host application's schema (no separate searchkit schema).
+-- host application's schema (no separate searchkit schema). Migrations are
+-- unqualified and applied with search_path scoped to the host schema.
 --
 -- searchkit is config-driven at runtime:
---   - lexical docs are stored in search_documents (pg_trgm)
+--   - lexical docs are stored in search_documents (pg_trgm + FTS + PGroonga)
 --   - semantic vectors are stored in embedding_vectors (pgvector/halfvec)
 --   - models are registered in embedding_models
 --   - per-(model, language) cosine+binary ANN indexes are created CONCURRENTLY
 --     at runtime (so we do not ship a global ANN index here)
+--
+-- migratekit tracks applied migrations by filename, so existing databases
+-- skip this file. New migrations start at 0002.
+
+-- ----------------------------------------------------------------------------
+-- Extensions.
+-- ----------------------------------------------------------------------------
 
 -- pg_trgm provides trigram similarity operators + GIN index support.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
@@ -16,9 +25,41 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 -- pgvector provides the vector/halfvec types + HNSW indexes + operators.
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- pgroonga backs native-script (CJK/Korean) full-text matching. Requires
+-- superuser or elevated privileges; if your environment can't run CREATE
+-- EXTENSION from app migrations, install/enable it out-of-band and mark this
+-- migration applied.
+CREATE EXTENSION IF NOT EXISTS pgroonga;
+
 -- ----------------------------------------------------------------------------
--- Lexical document store (trigram/typeahead).
--- searchkit heavy-normalizes before storing.
+-- Functions.
+-- ----------------------------------------------------------------------------
+
+-- Map a BCP-47-ish language code (e.g. "en", "es") to a Postgres regconfig.
+-- Most installations only ship a subset of configs; we default to `simple`.
+CREATE OR REPLACE FUNCTION searchkit_regconfig_for_language(lang text)
+RETURNS regconfig
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT CASE lower(trim(coalesce(lang, '')))
+        WHEN 'en' THEN 'english'::regconfig
+        WHEN 'es' THEN 'spanish'::regconfig
+        WHEN 'fr' THEN 'french'::regconfig
+        WHEN 'de' THEN 'german'::regconfig
+        WHEN 'it' THEN 'italian'::regconfig
+        WHEN 'pt' THEN 'portuguese'::regconfig
+        WHEN 'ru' THEN 'russian'::regconfig
+        -- For languages without a built-in stemmer config (e.g. ja/ko/zh),
+        -- `simple` still tokenizes reasonably and is deterministic.
+        ELSE 'simple'::regconfig
+    END;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Lexical document store (typeahead + FTS + native-script search).
+-- searchkit heavy-normalizes `document` before storing; `raw_document` keeps
+-- the host-provided text for FTS/PGroonga, which prefer it over `document`.
 -- ----------------------------------------------------------------------------
 CREATE TABLE search_documents (
     entity_type text NOT NULL,
@@ -27,14 +68,29 @@ CREATE TABLE search_documents (
     document text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    raw_document text,
+    tsv tsvector,
     PRIMARY KEY (entity_type, entity_id, language)
 );
 
 CREATE INDEX idx_search_documents_entity_language
     ON search_documents(entity_type, language);
 
+-- Trigram index for typeahead.
 CREATE INDEX idx_search_documents_document_gin
     ON search_documents USING gin (document gin_trgm_ops);
+
+-- FTS index (BM25-family lexical search).
+CREATE INDEX idx_search_documents_tsv_gin
+    ON search_documents USING gin (tsv);
+
+-- PGroonga full-text index for native-script queries (primary for ja/zh/ko).
+-- Partial index keeps size manageable while targeting languages that most
+-- need segmentation.
+CREATE INDEX idx_search_documents_raw_document_pgroonga_cjk
+    ON search_documents
+ USING pgroonga (raw_document)
+ WHERE language IN ('ja', 'zh', 'ko');
 
 -- ----------------------------------------------------------------------------
 -- Dirty queue: host marks (entity_type, entity_id, language) as changed.
