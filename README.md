@@ -129,7 +129,7 @@ Note on PGroonga (CJK/Korean support):
 
 - You must install the PGroonga extension package in your Postgres image for your Postgres major version (package names vary by distro).
   - Example (Debian/Ubuntu images): install `postgresql-<MAJOR>-pgroonga` from the PGDG/APT repo, then restart Postgres.
-- Migration `003_pgroonga_search_documents` runs `CREATE EXTENSION pgroonga`, which typically requires superuser (or elevated) privileges.
+- The baseline migration runs `CREATE EXTENSION pgroonga`, which typically requires superuser (or elevated) privileges.
 - If your environment can’t run `CREATE EXTENSION` from app migrations, install/enable PGroonga out-of-band, then mark the migration applied (or apply it manually).
 - If PGroonga is not installed/enabled, CJK/Korean routing (`ja/zh/ko`) will fail at query time with a Postgres error (missing operator/function/index).
 
