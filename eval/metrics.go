@@ -1,8 +1,5 @@
 package eval
 
-// This package is intentionally minimal: it provides a small set of evaluation
-// metrics that apps can use with their own hand-written test cases.
-
 type Key struct {
 	EntityType string
 	EntityID   string
@@ -37,11 +34,12 @@ func RecallAtK(got []Key, expected []Key, k int) float64 {
 			hit++
 		}
 	}
-
 	return float64(hit) / float64(len(expected))
 }
 
-// MRR computes mean reciprocal rank for a single case.
+// MRR computes mean reciprocal rank for a single case. The historical behavior
+// and name are retained for compatibility; new code should use GoldenCase and
+// Summarize for aggregate MRR@K.
 func MRR(got []Key, expected []Key) float64 {
 	if len(expected) == 0 {
 		return 1.0
