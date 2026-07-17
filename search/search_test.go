@@ -146,8 +146,19 @@ func TestSemanticSearch_RejectsNonfiniteMinSimilarity(t *testing.T) {
 
 	for _, value := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
 		_, err := SemanticSearch(context.Background(), pool, Query{Options: Options{MinSimilarity: value}})
-		if err == nil {
-			t.Fatalf("SemanticSearch(MinSimilarity=%v) error = nil", value)
+		if err == nil || err.Error() != "min similarity must be finite" {
+			t.Fatalf("SemanticSearch(MinSimilarity=%v) error = %v, want finite validation error", value, err)
+		}
+	}
+}
+
+func TestSimilarTo_RejectsNonfiniteMinSimilarity(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+		_, err := SimilarTo(context.Background(), nil, "test", "gallery", "1", "model", "en", 10, Options{MinSimilarity: value})
+		if err == nil || err.Error() != "min similarity must be finite" {
+			t.Fatalf("SimilarTo(MinSimilarity=%v) error = %v, want finite validation error", value, err)
 		}
 	}
 }
@@ -156,6 +167,15 @@ func TestMergeNamedArgs_EmptyKey(t *testing.T) {
 	dst := pgx.NamedArgs{"model": "x"}
 	if err := mergeNamedArgs(dst, map[string]any{"": 1}); err == nil {
 		t.Fatalf("expected empty key error")
+	}
+}
+
+func TestMergeNamedArgs_ReservedSearchArgs(t *testing.T) {
+	for _, name := range []string{"min_similarity", "qvec", "limit", "oversample"} {
+		dst := pgx.NamedArgs{name: 1}
+		if err := mergeNamedArgs(dst, map[string]any{name: 2}); err == nil {
+			t.Fatalf("mergeNamedArgs() error = nil, want reserved %s conflict", name)
+		}
 	}
 }
 

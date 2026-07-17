@@ -120,6 +120,10 @@ type SearchOptions struct {
 	// SemanticMinSimilarity drops semantic candidates below this cosine
 	// similarity before RRF. Values <= 0 disable the additional floor.
 	SemanticMinSimilarity float32
+	// SemanticMinSimilarityEnabled applies SemanticMinSimilarity even when it is
+	// zero. This preserves an inclusive non-negative floor while the zero value
+	// of both fields continues to disable filtering.
+	SemanticMinSimilarityEnabled bool
 
 	FilterSQL  string
 	FilterArgs map[string]any
@@ -140,7 +144,8 @@ type SimilarOptions struct {
 	EntityTypes []string
 	ExcludeIDs  []string
 
-	MinSimilarity float32
+	MinSimilarity        float32
+	MinSimilarityEnabled bool
 
 	FilterSQL  string
 	FilterArgs map[string]any
@@ -226,7 +231,8 @@ func (c *Client) search(ctx context.Context, userText string, opts SearchOptions
 	}
 
 	semanticMinSimilarity := opts.SemanticMinSimilarity
-	if semanticMinSimilarity <= 0 {
+	semanticMinSimilarityEnabled := opts.SemanticMinSimilarityEnabled || semanticMinSimilarity > 0
+	if semanticMinSimilarity <= 0 && !semanticMinSimilarityEnabled {
 		semanticMinSimilarity = 0
 	}
 
@@ -241,6 +247,7 @@ func (c *Client) search(ctx context.Context, userText string, opts SearchOptions
 		trace.CandidateLimit = candidateLimit
 		trace.RRFK = rrfk
 		trace.SemanticMinSimilarity = semanticMinSimilarity
+		trace.SemanticMinSimilarityEnabled = semanticMinSimilarityEnabled
 	}
 
 	lexTypes := cloneAndTrim(opts.LexicalEntityTypes)
@@ -328,7 +335,7 @@ func (c *Client) search(ctx context.Context, userText string, opts SearchOptions
 		}
 
 		for _, lang := range languages {
-			semKeys, err := c.searchSemantic(ctx, lang, model, vec, candidateLimit, semTypes, twoStage, oversample, semanticMinSimilarity, opts.FilterSQL, opts.FilterArgs, trace)
+			semKeys, err := c.searchSemantic(ctx, lang, model, vec, candidateLimit, semTypes, twoStage, oversample, semanticMinSimilarity, semanticMinSimilarityEnabled, opts.FilterSQL, opts.FilterArgs, trace)
 			if err != nil {
 				return nil, err
 			}
@@ -400,11 +407,12 @@ func (c *Client) SimilarTo(ctx context.Context, entityType string, entityID stri
 	}
 
 	rows, err := search.SimilarTo(ctx, c.pool, c.schema, entityType, entityID, model, lang, limit, search.Options{
-		EntityTypes:   cloneAndTrim(opts.EntityTypes),
-		ExcludeIDs:    cloneAndTrim(opts.ExcludeIDs),
-		MinSimilarity: opts.MinSimilarity,
-		FilterSQL:     opts.FilterSQL,
-		FilterArgs:    opts.FilterArgs,
+		EntityTypes:          cloneAndTrim(opts.EntityTypes),
+		ExcludeIDs:           cloneAndTrim(opts.ExcludeIDs),
+		MinSimilarity:        opts.MinSimilarity,
+		MinSimilarityEnabled: opts.MinSimilarityEnabled,
+		FilterSQL:            opts.FilterSQL,
+		FilterArgs:           opts.FilterArgs,
 	})
 	if err != nil {
 		return nil, err
@@ -545,6 +553,7 @@ func (c *Client) searchSemantic(
 	twoStage bool,
 	oversampleFactor int,
 	minSimilarity float32,
+	minSimilarityEnabled bool,
 	filterSQL string,
 	filterArgs map[string]any,
 	trace *SearchTrace,
@@ -558,12 +567,13 @@ func (c *Client) searchSemantic(
 		Limit:      limit,
 		Dimensions: len(queryVec),
 		Options: search.Options{
-			EntityTypes:      entityTypes,
-			MinSimilarity:    minSimilarity,
-			TwoStage:         twoStage,
-			OversampleFactor: oversampleFactor,
-			FilterSQL:        filterSQL,
-			FilterArgs:       filterArgs,
+			EntityTypes:          entityTypes,
+			MinSimilarity:        minSimilarity,
+			MinSimilarityEnabled: minSimilarityEnabled,
+			TwoStage:             twoStage,
+			OversampleFactor:     oversampleFactor,
+			FilterSQL:            filterSQL,
+			FilterArgs:           filterArgs,
 		},
 	})
 	if err != nil {

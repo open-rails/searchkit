@@ -45,7 +45,7 @@ SearchKit applies filters in retrieval queries before ranking/pagination.
 
 - `Limit`: maximum final RRF-fused hits returned to the host.
 - `CandidateLimit`: maximum candidates requested from each lexical/semantic source before RRF. It defaults to `Limit` and is clamped to at least `Limit`.
-- `SemanticMinSimilarity`: positive raw cosine-similarity floor applied to semantic candidates before RRF. Values `<= 0` disable the additional floor; NaN and infinities are rejected.
+- `SemanticMinSimilarity`: positive raw cosine-similarity floor applied to semantic candidates before RRF. Values `<= 0` disable the additional floor unless `SemanticMinSimilarityEnabled` is true; NaN and infinities are rejected. Enable an explicit zero floor to retain candidates with cosine similarity exactly zero while dropping negative candidates.
 
 `OversampleFactor` is independent: with two-stage semantic retrieval it controls the approximate stage-one width (`CandidateLimit * OversampleFactor`) before exact cosine rescore. Values `<= 1` use effective factor `5`.
 

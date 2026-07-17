@@ -238,6 +238,8 @@ Search scores and semantic confidence are different domains:
 
 - `SearchHit.Score` is an RRF score derived from source ranks. It is not cosine similarity.
 - `SemanticMinSimilarity` filters raw cosine similarity before RRF.
+- `SemanticMinSimilarityEnabled` makes an explicit zero floor inclusive, retaining zero-similarity candidates while dropping negative candidates.
+- `SimilarOptions.MinSimilarityEnabled` provides the same explicit zero-floor behavior for nearest-neighbor recommendations.
 - `CandidateLimit` controls each source's retrieval depth; `Limit` controls the final response size.
 - `OversampleFactor` controls only the binary-quantized first stage when `TwoStage=true`. Values `<=1` use the effective default `5`.
 

@@ -92,30 +92,32 @@ type ResultTrace struct {
 
 // SearchTrace contains opt-in effective configuration and retrieval provenance.
 type SearchTrace struct {
-	NormalizedQuery                string        `json:"normalized_query"`
-	RequestedMode                  SearchMode    `json:"requested_mode,omitempty"`
-	Mode                           SearchMode    `json:"mode"`
-	RequestedLanguage              string        `json:"requested_language,omitempty"`
-	RequestedLanguageMode          LanguageMode  `json:"requested_language_mode,omitempty"`
-	Languages                      []string      `json:"languages,omitempty"`
-	RequestedModel                 string        `json:"requested_model,omitempty"`
-	Model                          string        `json:"model,omitempty"`
-	RequestedResultLimit           int           `json:"requested_result_limit"`
-	ResultLimit                    int           `json:"result_limit"`
-	RequestedCandidateLimit        int           `json:"requested_candidate_limit"`
-	CandidateLimit                 int           `json:"candidate_limit"`
-	RequestedRRFK                  int           `json:"requested_rrf_k"`
-	RRFK                           int           `json:"rrf_k"`
-	RequestedTwoStage              *bool         `json:"requested_two_stage,omitempty"`
-	TwoStage                       bool          `json:"two_stage"`
-	RequestedOversampleFactor      int           `json:"requested_oversample_factor"`
-	OversampleFactor               int           `json:"oversample_factor"`
-	RequestedSemanticMinSimilarity *float32      `json:"requested_semantic_min_similarity,omitempty"`
-	SemanticMinSimilarity          float32       `json:"semantic_min_similarity"`
-	Sources                        []SourceTrace `json:"sources,omitempty"`
-	Results                        []ResultTrace `json:"results,omitempty"`
-	EmptyReason                    EmptyReason   `json:"empty_reason,omitempty"`
-	ErrorCategory                  string        `json:"error_category,omitempty"`
+	NormalizedQuery                       string        `json:"normalized_query"`
+	RequestedMode                         SearchMode    `json:"requested_mode,omitempty"`
+	Mode                                  SearchMode    `json:"mode"`
+	RequestedLanguage                     string        `json:"requested_language,omitempty"`
+	RequestedLanguageMode                 LanguageMode  `json:"requested_language_mode,omitempty"`
+	Languages                             []string      `json:"languages,omitempty"`
+	RequestedModel                        string        `json:"requested_model,omitempty"`
+	Model                                 string        `json:"model,omitempty"`
+	RequestedResultLimit                  int           `json:"requested_result_limit"`
+	ResultLimit                           int           `json:"result_limit"`
+	RequestedCandidateLimit               int           `json:"requested_candidate_limit"`
+	CandidateLimit                        int           `json:"candidate_limit"`
+	RequestedRRFK                         int           `json:"requested_rrf_k"`
+	RRFK                                  int           `json:"rrf_k"`
+	RequestedTwoStage                     *bool         `json:"requested_two_stage,omitempty"`
+	TwoStage                              bool          `json:"two_stage"`
+	RequestedOversampleFactor             int           `json:"requested_oversample_factor"`
+	OversampleFactor                      int           `json:"oversample_factor"`
+	RequestedSemanticMinSimilarity        *float32      `json:"requested_semantic_min_similarity,omitempty"`
+	SemanticMinSimilarity                 float32       `json:"semantic_min_similarity"`
+	RequestedSemanticMinSimilarityEnabled bool          `json:"requested_semantic_min_similarity_enabled"`
+	SemanticMinSimilarityEnabled          bool          `json:"semantic_min_similarity_enabled"`
+	Sources                               []SourceTrace `json:"sources,omitempty"`
+	Results                               []ResultTrace `json:"results,omitempty"`
+	EmptyReason                           EmptyReason   `json:"empty_reason,omitempty"`
+	ErrorCategory                         string        `json:"error_category,omitempty"`
 }
 
 func initializeSearchTrace(client *Client, normalizedQuery string, opts SearchOptions) SearchTrace {
@@ -144,12 +146,14 @@ func initializeSearchTrace(client *Client, normalizedQuery string, opts SearchOp
 		candidateLimit = limit
 	}
 	semanticMinSimilarity := opts.SemanticMinSimilarity
+	finiteSemanticMinSimilarity := !math.IsNaN(float64(semanticMinSimilarity)) && !math.IsInf(float64(semanticMinSimilarity), 0)
+	semanticMinSimilarityEnabled := finiteSemanticMinSimilarity && (opts.SemanticMinSimilarityEnabled || semanticMinSimilarity > 0)
 	var requestedSemanticMinSimilarity *float32
-	if !math.IsNaN(float64(semanticMinSimilarity)) && !math.IsInf(float64(semanticMinSimilarity), 0) {
+	if finiteSemanticMinSimilarity {
 		value := semanticMinSimilarity
 		requestedSemanticMinSimilarity = &value
 	}
-	if semanticMinSimilarity <= 0 || requestedSemanticMinSimilarity == nil {
+	if (semanticMinSimilarity <= 0 && !semanticMinSimilarityEnabled) || requestedSemanticMinSimilarity == nil {
 		semanticMinSimilarity = 0
 	}
 	rrfk := opts.RRFK
@@ -179,8 +183,10 @@ func initializeSearchTrace(client *Client, normalizedQuery string, opts SearchOp
 		RequestedRRFK: opts.RRFK, RRFK: rrfk,
 		RequestedTwoStage: requestedTwoStage, TwoStage: twoStage,
 		RequestedOversampleFactor: opts.OversampleFactor, OversampleFactor: oversample,
-		RequestedSemanticMinSimilarity: requestedSemanticMinSimilarity,
-		SemanticMinSimilarity:          semanticMinSimilarity,
+		RequestedSemanticMinSimilarity:        requestedSemanticMinSimilarity,
+		SemanticMinSimilarity:                 semanticMinSimilarity,
+		RequestedSemanticMinSimilarityEnabled: opts.SemanticMinSimilarityEnabled,
+		SemanticMinSimilarityEnabled:          semanticMinSimilarityEnabled,
 	}
 }
 
