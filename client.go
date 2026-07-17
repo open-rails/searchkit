@@ -3,6 +3,7 @@ package searchkit
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -106,6 +107,9 @@ type SearchOptions struct {
 	SemanticEntityTypes []string
 
 	Limit int
+	// CandidateLimit is the maximum number requested from each retrieval source
+	// before RRF. It defaults to Limit and is clamped to at least Limit.
+	CandidateLimit int
 
 	// Semantic model override (defaults to client).
 	Model string
@@ -113,6 +117,9 @@ type SearchOptions struct {
 	TwoStage         *bool
 	OversampleFactor int
 	RRFK             int
+	// SemanticMinSimilarity drops semantic candidates below this cosine
+	// similarity before RRF. Values <= 0 disable the additional floor.
+	SemanticMinSimilarity float32
 
 	FilterSQL  string
 	FilterArgs map[string]any
@@ -148,8 +155,49 @@ type SimilarHit struct {
 }
 
 func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions) ([]SearchHit, error) {
+	return c.search(ctx, userText, opts, nil)
+}
+
+// SearchWithTrace executes Search and returns opt-in retrieval provenance. On
+// failure, the returned trace contains all work completed before the error.
+func (c *Client) SearchWithTrace(ctx context.Context, userText string, opts SearchOptions) ([]SearchHit, SearchTrace, error) {
+	var trace SearchTrace
+	hits, err := c.search(ctx, userText, opts, &trace)
+	return hits, trace, err
+}
+
+func (c *Client) search(ctx context.Context, userText string, opts SearchOptions, trace *SearchTrace) ([]SearchHit, error) {
 	qEmbed := querynorm.QueryForEmbedding(userText)
+	if trace != nil {
+		*trace = initializeSearchTrace(c, qEmbed, opts)
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = c.defaultLimit
+	}
+	candidateLimit := opts.CandidateLimit
+	if candidateLimit <= 0 {
+		candidateLimit = limit
+	}
+	if candidateLimit < limit {
+		candidateLimit = limit
+	}
+	if candidateLimit > search.MaxCandidateLimit {
+		if trace != nil {
+			trace.ErrorCategory = "validation"
+		}
+		return nil, fmt.Errorf("effective CandidateLimit must not exceed %d", search.MaxCandidateLimit)
+	}
+	if math.IsNaN(float64(opts.SemanticMinSimilarity)) || math.IsInf(float64(opts.SemanticMinSimilarity), 0) {
+		if trace != nil {
+			trace.ErrorCategory = "validation"
+		}
+		return nil, fmt.Errorf("SemanticMinSimilarity must be finite")
+	}
 	if qEmbed == "" || !hasAnyLetterOrNumber(qEmbed) {
+		if trace != nil {
+			trace.EmptyReason = EmptyReasonNormalizedQuery
+		}
 		return []SearchHit{}, nil
 	}
 
@@ -159,6 +207,9 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 	}
 	languages, err := resolveLanguageModes(language, opts.LanguageMode)
 	if err != nil {
+		if trace != nil {
+			trace.ErrorCategory = "validation"
+		}
 		return nil, fmt.Errorf("invalid SearchOptions.LanguageMode %q", opts.LanguageMode)
 	}
 	mode := opts.Mode
@@ -168,17 +219,28 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 	switch mode {
 	case SearchModeLexical, SearchModeSemantic, SearchModeDual:
 	default:
+		if trace != nil {
+			trace.ErrorCategory = "validation"
+		}
 		return nil, fmt.Errorf("invalid SearchOptions.Mode %q", mode)
 	}
 
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = c.defaultLimit
+	semanticMinSimilarity := opts.SemanticMinSimilarity
+	if semanticMinSimilarity <= 0 {
+		semanticMinSimilarity = 0
 	}
 
 	rrfk := opts.RRFK
 	if rrfk <= 0 {
 		rrfk = c.defaultRRFK
+	}
+	if trace != nil {
+		trace.Mode = mode
+		trace.Languages = append([]string(nil), languages...)
+		trace.ResultLimit = limit
+		trace.CandidateLimit = candidateLimit
+		trace.RRFK = rrfk
+		trace.SemanticMinSimilarity = semanticMinSimilarity
 	}
 
 	lexTypes := cloneAndTrim(opts.LexicalEntityTypes)
@@ -194,9 +256,15 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 	}
 
 	if mode != SearchModeSemantic && len(lexTypes) == 0 {
+		if trace != nil {
+			trace.ErrorCategory = "validation"
+		}
 		return nil, fmt.Errorf("LexicalEntityTypes is required for lexical/dual search")
 	}
 	if mode != SearchModeLexical && len(semTypes) == 0 {
+		if trace != nil {
+			trace.ErrorCategory = "validation"
+		}
 		return nil, fmt.Errorf("SemanticEntityTypes is required for semantic/dual search")
 	}
 
@@ -204,7 +272,7 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 
 	if mode == SearchModeLexical || mode == SearchModeDual {
 		for _, lang := range languages {
-			lexLists, err := c.searchLexical(ctx, qEmbed, lang, limit, lexTypes, opts.FilterSQL, opts.FilterArgs)
+			lexLists, err := c.searchLexical(ctx, qEmbed, lang, candidateLimit, lexTypes, opts.FilterSQL, opts.FilterArgs, trace)
 			if err != nil {
 				return nil, err
 			}
@@ -214,6 +282,9 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 
 	if mode == SearchModeSemantic || mode == SearchModeDual {
 		if c.embedder == nil {
+			if trace != nil {
+				trace.ErrorCategory = "embedder_required"
+			}
 			return nil, fmt.Errorf("Embedder is required for semantic search")
 		}
 		model := strings.TrimSpace(opts.Model)
@@ -221,6 +292,9 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 			model = c.defaultModel
 		}
 		if strings.TrimSpace(model) == "" {
+			if trace != nil {
+				trace.ErrorCategory = "model_required"
+			}
 			return nil, fmt.Errorf("Model is required for semantic search")
 		}
 
@@ -232,17 +306,29 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 		if oversample <= 0 {
 			oversample = c.defaultOversample
 		}
+		oversample = search.EffectiveOversampleFactor(oversample)
+		if trace != nil {
+			trace.Model = model
+			trace.TwoStage = twoStage
+			trace.OversampleFactor = oversample
+		}
 
 		vec, err := c.embedder.EmbedQueryText(ctx, model, qEmbed)
 		if err != nil {
+			if trace != nil {
+				trace.ErrorCategory = "embedding"
+			}
 			return nil, err
 		}
 		if len(vec) == 0 {
+			if trace != nil {
+				trace.EmptyReason = EmptyReasonEmbedding
+			}
 			return []SearchHit{}, nil
 		}
 
 		for _, lang := range languages {
-			semKeys, err := c.searchSemantic(ctx, lang, model, vec, limit, semTypes, twoStage, oversample, opts.FilterSQL, opts.FilterArgs)
+			semKeys, err := c.searchSemantic(ctx, lang, model, vec, candidateLimit, semTypes, twoStage, oversample, semanticMinSimilarity, opts.FilterSQL, opts.FilterArgs, trace)
 			if err != nil {
 				return nil, err
 			}
@@ -251,10 +337,33 @@ func (c *Client) Search(ctx context.Context, userText string, opts SearchOptions
 	}
 
 	if len(lists) == 0 {
+		if trace != nil {
+			trace.EmptyReason = EmptyReasonNoRoute
+		}
 		return []SearchHit{}, nil
 	}
 
-	fused := search.FuseRRF(lists, search.RRFOptions{K: rrfk})
+	var fused []search.RRFHit
+	if trace == nil {
+		fused = search.FuseRRF(lists, search.RRFOptions{K: rrfk})
+	} else {
+		traced, err := search.FuseRRFWithTrace(lists, search.RRFOptions{K: rrfk})
+		if err != nil {
+			trace.ErrorCategory = "rrf"
+			return nil, fmt.Errorf("fusing traced search results: %w", err)
+		}
+		fused = make([]search.RRFHit, 0, len(traced))
+		trace.Results = make([]ResultTrace, 0, minInt(limit, len(traced)))
+		for i, hit := range traced {
+			fused = append(fused, hit.Hit)
+			if i < limit {
+				trace.Results = append(trace.Results, resultTraceFromRRF(i+1, hit))
+			}
+		}
+	}
+	if len(fused) == 0 && trace != nil {
+		trace.EmptyReason = EmptyReasonNoCandidates
+	}
 	out := make([]SearchHit, 0, minInt(limit, len(fused)))
 	for _, h := range fused {
 		out = append(out, SearchHit{
@@ -314,11 +423,12 @@ func (c *Client) SimilarTo(ctx context.Context, entityType string, entityID stri
 	return out, nil
 }
 
-func (c *Client) searchLexical(ctx context.Context, q string, language string, limit int, entityTypes []string, filterSQL string, filterArgs map[string]any) ([][]search.RRFKey, error) {
+func (c *Client) searchLexical(ctx context.Context, q string, language string, limit int, entityTypes []string, filterSQL string, filterArgs map[string]any, trace *SearchTrace) ([][]search.RRFKey, error) {
 	route := lexicalRouting(language, q, false)
 	out := make([][]search.RRFKey, 0, 2)
 
 	if route.useFTS {
+		traceIndex := beginSourceTrace(trace, BackendFTS, language, "", ScoreFTSRank, limit)
 		lex, err := search.FTSSearch(ctx, c.pool, q, search.FTSOptions{
 			Schema:      c.schema,
 			Language:    language,
@@ -328,16 +438,29 @@ func (c *Client) searchLexical(ctx context.Context, q string, language string, l
 			FilterArgs:  filterArgs,
 		})
 		if err != nil {
+			failSourceTrace(trace, traceIndex, "fts")
 			return nil, err
 		}
 		keys := make([]search.RRFKey, 0, len(lex))
-		for _, h := range lex {
-			keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+		var candidates []CandidateTrace
+		if trace != nil {
+			candidates = make([]CandidateTrace, 0, len(lex))
 		}
+		for i, h := range lex {
+			keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+			if trace != nil {
+				candidates = append(candidates, CandidateTrace{
+					Key:  TraceKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language},
+					Rank: i + 1, Score: h.Score,
+				})
+			}
+		}
+		completeSourceTrace(trace, traceIndex, candidates)
 		out = append(out, keys)
 	}
 
 	if route.useTrigram {
+		traceIndex := beginSourceTrace(trace, BackendTrigram, language, "", ScoreTrigramSimilarity, limit)
 		lex, err := search.LexicalSearch(ctx, c.pool, q, search.LexicalOptions{
 			Schema:        c.schema,
 			Language:      language,
@@ -348,16 +471,29 @@ func (c *Client) searchLexical(ctx context.Context, q string, language string, l
 			FilterArgs:    filterArgs,
 		})
 		if err != nil {
+			failSourceTrace(trace, traceIndex, "trigram")
 			return nil, err
 		}
 		keys := make([]search.RRFKey, 0, len(lex))
-		for _, h := range lex {
-			keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+		var candidates []CandidateTrace
+		if trace != nil {
+			candidates = make([]CandidateTrace, 0, len(lex))
 		}
+		for i, h := range lex {
+			keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+			if trace != nil {
+				candidates = append(candidates, CandidateTrace{
+					Key:  TraceKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language},
+					Rank: i + 1, Score: h.Score,
+				})
+			}
+		}
+		completeSourceTrace(trace, traceIndex, candidates)
 		out = append(out, keys)
 	}
 
 	if route.usePGroonga {
+		traceIndex := beginSourceTrace(trace, BackendPGroonga, language, "", ScorePGroongaRaw, limit)
 		lex, err := search.PGroongaSearch(ctx, c.pool, q, search.PGroongaOptions{
 			Schema:      c.schema,
 			Language:    language,
@@ -369,12 +505,27 @@ func (c *Client) searchLexical(ctx context.Context, q string, language string, l
 			FilterArgs:  filterArgs,
 		})
 		if err != nil {
+			failSourceTrace(trace, traceIndex, "pgroonga")
 			return nil, err
 		}
 		keys := make([]search.RRFKey, 0, len(lex))
-		for _, h := range lex {
-			keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+		var candidates []CandidateTrace
+		if trace != nil {
+			candidates = make([]CandidateTrace, 0, len(lex))
 		}
+		for i, h := range lex {
+			keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+			if trace != nil {
+				normalizedScore := h.Score
+				candidates = append(candidates, CandidateTrace{
+					Key:             TraceKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language},
+					Rank:            i + 1,
+					Score:           h.RawScore,
+					NormalizedScore: &normalizedScore,
+				})
+			}
+		}
+		completeSourceTrace(trace, traceIndex, candidates)
 		out = append(out, keys)
 	}
 
@@ -393,9 +544,12 @@ func (c *Client) searchSemantic(
 	entityTypes []string,
 	twoStage bool,
 	oversampleFactor int,
+	minSimilarity float32,
 	filterSQL string,
 	filterArgs map[string]any,
+	trace *SearchTrace,
 ) ([]search.RRFKey, error) {
+	traceIndex := beginSourceTrace(trace, BackendSemantic, language, model, ScoreCosineSimilarity, limit)
 	sem, err := search.SemanticSearch(ctx, c.pool, search.Query{
 		Schema:     c.schema,
 		Model:      model,
@@ -405,6 +559,7 @@ func (c *Client) searchSemantic(
 		Dimensions: len(queryVec),
 		Options: search.Options{
 			EntityTypes:      entityTypes,
+			MinSimilarity:    minSimilarity,
 			TwoStage:         twoStage,
 			OversampleFactor: oversampleFactor,
 			FilterSQL:        filterSQL,
@@ -412,12 +567,24 @@ func (c *Client) searchSemantic(
 		},
 	})
 	if err != nil {
+		failSourceTrace(trace, traceIndex, "semantic")
 		return nil, err
 	}
 	keys := make([]search.RRFKey, 0, len(sem))
-	for _, h := range sem {
-		keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+	var candidates []CandidateTrace
+	if trace != nil {
+		candidates = make([]CandidateTrace, 0, len(sem))
 	}
+	for i, h := range sem {
+		keys = append(keys, search.RRFKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language})
+		if trace != nil {
+			candidates = append(candidates, CandidateTrace{
+				Key:  TraceKey{EntityType: h.EntityType, EntityID: h.EntityID, Language: h.Language},
+				Rank: i + 1, Score: h.Similarity,
+			})
+		}
+	}
+	completeSourceTrace(trace, traceIndex, candidates)
 	return keys, nil
 }
 
