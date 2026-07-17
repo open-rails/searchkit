@@ -112,7 +112,6 @@ func TestClientSearch_Integration_LexicalAndSemantic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert embedding_vectors 3: %v", err)
 	}
-
 	emb := &recordingEmbedder{vec: []float32{1, 0, 0}}
 	client, err := NewClient(ClientConfig{
 		Pool:         pool,
@@ -272,6 +271,59 @@ func TestClientSearch_Integration_LexicalAndSemantic(t *testing.T) {
 	if len(positiveHits) != 2 || len(positiveTrace.Sources[0].Candidates) != 2 {
 		t.Fatalf("positive floor did not remove negative candidate: hits=%+v trace=%+v", positiveHits, positiveTrace)
 	}
+	_, err = pool.Exec(ctx, fmt.Sprintf(`
+		INSERT INTO %s.embedding_vectors(entity_type, entity_id, model, language, embedding)
+		VALUES ('gallery', '4', 'm', 'en', $1::halfvec(3))
+	`, quotedSchema), pgvector.NewHalfVector([]float32{0, 1, 0}))
+	if err != nil {
+		t.Fatalf("insert embedding_vectors 4: %v", err)
+	}
+
+	zeroFloorHits, zeroFloorTrace, err := client.SearchWithTrace(ctx, "two-factor", SearchOptions{
+		Mode:                         SearchModeSemantic,
+		Language:                     "en",
+		SemanticEntityTypes:          []string{"gallery"},
+		Limit:                        4,
+		CandidateLimit:               4,
+		TwoStage:                     boolPointer(true),
+		OversampleFactor:             2,
+		SemanticMinSimilarityEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("two-stage explicit-zero-floor Search: %v", err)
+	}
+	if len(zeroFloorHits) != 3 || len(zeroFloorTrace.Sources[0].Candidates) != 3 || !zeroFloorTrace.SemanticMinSimilarityEnabled {
+		t.Fatalf("explicit zero floor did not keep zero/drop negative: hits=%+v trace=%+v", zeroFloorHits, zeroFloorTrace)
+	}
+	assertEntityIDs(t, zeroFloorHits, []string{"1", "2", "4"})
+
+	oneStage := false
+	oneStageHits, _, err := client.SearchWithTrace(ctx, "two-factor", SearchOptions{
+		Mode:                         SearchModeSemantic,
+		Language:                     "en",
+		SemanticEntityTypes:          []string{"gallery"},
+		Limit:                        4,
+		CandidateLimit:               4,
+		TwoStage:                     &oneStage,
+		SemanticMinSimilarityEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("one-stage explicit-zero-floor Search: %v", err)
+	}
+	assertEntityIDs(t, oneStageHits, []string{"1", "2", "4"})
+
+	similarHits, err := client.SimilarTo(ctx, "gallery", "1", SimilarOptions{
+		Language:             "en",
+		Model:                "m",
+		Limit:                4,
+		MinSimilarityEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("explicit-zero-floor SimilarTo: %v", err)
+	}
+	if len(similarHits) != 2 || similarHits[0].EntityID != "2" || similarHits[1].EntityID != "4" {
+		t.Fatalf("explicit zero floor did not keep zero/drop negative SimilarTo hit: %+v", similarHits)
+	}
 
 	filteredLex, err := client.Search(ctx, "two factor", SearchOptions{
 		Mode:               SearchModeLexical,
@@ -395,4 +447,16 @@ func TestClientSearch_Integration_LexicalAndSemantic(t *testing.T) {
 
 func boolPointer(value bool) *bool {
 	return &value
+}
+
+func assertEntityIDs(t *testing.T, hits []SearchHit, want []string) {
+	t.Helper()
+	if len(hits) != len(want) {
+		t.Fatalf("hit count = %d, want %d: %+v", len(hits), len(want), hits)
+	}
+	for i := range want {
+		if hits[i].EntityID != want[i] {
+			t.Fatalf("hit %d entity ID = %q, want %q: %+v", i, hits[i].EntityID, want[i], hits)
+		}
+	}
 }

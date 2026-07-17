@@ -28,6 +28,8 @@ type Options struct {
 
 	// Minimum similarity threshold (cosine similarity in [0..1] typically).
 	MinSimilarity float32
+	// MinSimilarityEnabled applies MinSimilarity even when it is zero.
+	MinSimilarityEnabled bool
 
 	// Enable two-stage retrieval (binary quantize oversample + halfvec rescore).
 	TwoStage bool
@@ -145,20 +147,37 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 	table := quotedSchema + ".embedding_vectors"
 
 	opts := q.Options
-	if opts.MinSimilarity <= 0 {
+	if opts.MinSimilarity <= 0 && !opts.MinSimilarityEnabled {
 		opts.MinSimilarity = 0
 	}
 	opts.OversampleFactor = EffectiveOversampleFactor(opts.OversampleFactor)
+	applyMinSimilarity := opts.MinSimilarityEnabled || opts.MinSimilarity > 0
+	oversample := 0
+	if opts.TwoStage {
+		if q.Limit > int(^uint(0)>>1)/opts.OversampleFactor {
+			return nil, fmt.Errorf("candidate oversample limit overflows int")
+		}
+		oversample = q.Limit * opts.OversampleFactor
+	}
 
 	vec := pgvector.NewHalfVector(q.QueryVec)
 
 	var sql string
-	args := pgx.NamedArgs{}
+	args := pgx.NamedArgs{
+		"model":    q.Model,
+		"language": q.Language,
+		"qvec":     vec,
+		"limit":    q.Limit,
+	}
+	if opts.TwoStage {
+		args["oversample"] = oversample
+	}
 
 	// Common WHERE filters.
 	where := "WHERE ev.model = @model AND ev.language = @language AND ev.embedding IS NOT NULL"
-	args["model"] = q.Model
-	args["language"] = q.Language
+	if applyMinSimilarity {
+		args["min_similarity"] = opts.MinSimilarity
+	}
 	if len(opts.EntityTypes) > 0 {
 		where += " AND ev.entity_type = ANY(@entity_types::text[])"
 		args["entity_types"] = opts.EntityTypes
@@ -172,6 +191,9 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 		if err := mergeNamedArgs(args, opts.FilterArgs); err != nil {
 			return nil, err
 		}
+	}
+	if !opts.TwoStage && applyMinSimilarity {
+		where += fmt.Sprintf(" AND (1 - (ev.embedding::%s <=> (@qvec::%s))) >= @min_similarity", half, half)
 	}
 
 	if !opts.TwoStage {
@@ -191,18 +213,11 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 			LIMIT @limit
 		`, half, half, table, where, half, half)
 
-		args["qvec"] = vec
-		args["limit"] = q.Limit
 	} else {
-		if q.Limit > int(^uint(0)>>1)/opts.OversampleFactor {
-			return nil, fmt.Errorf("candidate oversample limit overflows int")
-		}
-		oversample := q.Limit * opts.OversampleFactor
 		minSimilarityFilter := ""
-		if opts.MinSimilarity > 0 {
+		if applyMinSimilarity {
 			minSimilarityFilter = "WHERE (1 - (embedding::%s <=> (@qvec::%s))) >= @min_similarity"
 			minSimilarityFilter = fmt.Sprintf(minSimilarityFilter, half, half)
-			args["min_similarity"] = opts.MinSimilarity
 		}
 
 		// 2-stage:
@@ -233,9 +248,6 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 				LIMIT @limit
 			`, table, where, half, dim, half, dim, half, half, minSimilarityFilter, half, half)
 
-		args["qvec"] = vec
-		args["oversample"] = oversample
-		args["limit"] = q.Limit
 	}
 
 	rows, err := pool.Query(ctx, sql, args)
@@ -250,9 +262,6 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 		if err := rows.Scan(&h.EntityType, &h.EntityID, &h.Model, &h.Language, &h.Similarity); err != nil {
 			return nil, err
 		}
-		if opts.MinSimilarity > 0 && h.Similarity < opts.MinSimilarity {
-			continue
-		}
 		out = append(out, h)
 	}
 	return out, rows.Err()
@@ -261,6 +270,9 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 // SimilarTo returns nearest neighbors to an existing stored vector for the same
 // model, excluding the source entity itself.
 func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityType string, entityID string, model string, language string, limit int, opts Options) ([]Hit, error) {
+	if math.IsNaN(float64(opts.MinSimilarity)) || math.IsInf(float64(opts.MinSimilarity), 0) {
+		return nil, fmt.Errorf("min similarity must be finite")
+	}
 	if pool == nil {
 		return nil, fmt.Errorf("pool is required")
 	}
@@ -300,6 +312,9 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		"language":    language,
 		"limit":       limit,
 	}
+	if opts.MinSimilarityEnabled || opts.MinSimilarity > 0 {
+		args["min_similarity"] = opts.MinSimilarity
+	}
 
 	if len(opts.EntityTypes) > 0 {
 		where += " AND ev.entity_type = ANY(@entity_types::text[])\n"
@@ -314,6 +329,9 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		if err := mergeNamedArgs(args, opts.FilterArgs); err != nil {
 			return nil, err
 		}
+	}
+	if opts.MinSimilarityEnabled || opts.MinSimilarity > 0 {
+		where += " AND (1 - (ev.embedding <=> s.embedding)) >= @min_similarity\n"
 	}
 
 	// NOTE: SimilarTo always runs 1-stage cosine KNN. Callers can run TwoStage by
@@ -348,9 +366,6 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		var h Hit
 		if err := rows.Scan(&h.EntityType, &h.EntityID, &h.Model, &h.Language, &h.Similarity); err != nil {
 			return nil, err
-		}
-		if opts.MinSimilarity > 0 && h.Similarity < opts.MinSimilarity {
-			continue
 		}
 		out = append(out, h)
 	}

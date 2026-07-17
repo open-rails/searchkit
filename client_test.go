@@ -73,6 +73,25 @@ func TestClientSearchWithTrace_ClampsCandidateLimit(t *testing.T) {
 	}
 }
 
+func TestClientSearchWithTrace_AppliesExplicitZeroSemanticFloor(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(ClientConfig{Pool: newTestPool(t), Schema: "test"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, trace, err := client.SearchWithTrace(context.Background(), "!!!", SearchOptions{
+		Mode: SearchModeLexical, LexicalEntityTypes: []string{"gallery"},
+		SemanticMinSimilarityEnabled: true,
+	})
+	if err != nil {
+		t.Fatalf("SearchWithTrace: %v", err)
+	}
+	if !trace.RequestedSemanticMinSimilarityEnabled || !trace.SemanticMinSimilarityEnabled || trace.SemanticMinSimilarity != 0 {
+		t.Fatalf("explicit zero floor not preserved in trace: %#v", trace)
+	}
+}
+
 func TestClientSearchWithTrace_RejectsNonfiniteSemanticFloor(t *testing.T) {
 	t.Parallel()
 
@@ -92,18 +111,35 @@ func TestClientSearchWithTrace_RejectsNonfiniteSemanticFloor(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, trace, err := client.SearchWithTrace(context.Background(), tt.query, SearchOptions{
 				Mode: SearchModeLexical, LexicalEntityTypes: []string{"gallery"},
-				SemanticMinSimilarity: tt.floor,
+				SemanticMinSimilarity:        tt.floor,
+				SemanticMinSimilarityEnabled: true,
 			})
 			if err == nil || trace.ErrorCategory != "validation" || trace.EmptyReason != "" {
 				t.Fatalf("SearchWithTrace() error/trace = %v/%#v, want validation failure", err, trace)
 			}
-			if trace.RequestedSemanticMinSimilarity != nil || trace.SemanticMinSimilarity != 0 {
+			if trace.RequestedSemanticMinSimilarity != nil || trace.SemanticMinSimilarity != 0 || trace.SemanticMinSimilarityEnabled {
 				t.Fatalf("nonfinite floor leaked into trace: %#v", trace)
 			}
 			if _, err := json.Marshal(trace); err != nil {
 				t.Fatalf("json.Marshal(trace) error = %v", err)
 			}
 		})
+	}
+}
+
+func TestClientSimilarTo_RejectsNonfiniteSemanticFloor(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(ClientConfig{Pool: newTestPool(t), Schema: "test", DefaultModel: "model"})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	_, err = client.SimilarTo(context.Background(), "gallery", "1", SimilarOptions{
+		Language:      "en",
+		MinSimilarity: float32(math.NaN()),
+	})
+	if err == nil || !strings.Contains(err.Error(), "min similarity must be finite") {
+		t.Fatalf("SimilarTo() error = %v, want finite validation error", err)
 	}
 }
 
