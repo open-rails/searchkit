@@ -226,11 +226,30 @@ hits, err := client.Search(ctx, userQuery, searchkit.SearchOptions{
   LanguageMode: searchkit.LanguageModeExact, // exact|fallback_en (default exact)
   Mode:     searchkit.SearchModeDual, // lexical|semantic|dual
   EntityTypes: []string{"gallery"},
-  Limit:    20,
-  FilterSQL:  "EXISTS (SELECT 1 FROM app.entities e WHERE e.id::text = sd.entity_id AND e.deleted_at IS NULL)",
-  FilterArgs: map[string]any{},
+  Limit:          20,  // final fused results
+  CandidateLimit: 100, // per-source candidates before RRF; defaults to Limit
+  // Positive cosine floor applied to semantic candidates before RRF.
+  // Values <= 0 disable the additional floor.
+  SemanticMinSimilarity: 0.35,
 })
 ```
+
+Search scores and semantic confidence are different domains:
+
+- `SearchHit.Score` is an RRF score derived from source ranks. It is not cosine similarity.
+- `SemanticMinSimilarity` filters raw cosine similarity before RRF.
+- `CandidateLimit` controls each source's retrieval depth; `Limit` controls the final response size.
+- `OversampleFactor` controls only the binary-quantized first stage when `TwoStage=true`. Values `<=1` use the effective default `5`.
+
+For offline evaluation and diagnostics, use the opt-in traced call:
+
+```go
+hits, trace, err := client.SearchWithTrace(ctx, userQuery, opts)
+```
+
+The trace records effective routing/configuration, source candidates and score domains, and exact RRF contributions. On failure, it contains the work completed before the error. Ordinary `Search` does not collect trace candidates.
+
+Traces contain normalized query text and candidate entity IDs. Treat them as potentially sensitive evaluation artifacts: do not log them indiscriminately, attach them to user-visible errors, or expose them from public APIs.
 
 Typeahead suggestions while typing:
 
@@ -252,6 +271,7 @@ Host-injected filters:
 - SearchKit applies these filters inside retrieval queries (before ranking/pagination) for lexical and semantic search paths.
 - Treat `FilterSQL` as trusted host SQL only. Never concatenate raw user input into it; pass values through `FilterArgs`.
 - This keeps SearchKit schema-agnostic: each host can enforce visibility/business constraints with host-specific SQL (including joins/EXISTS).
+- In dual mode, one `FilterSQL` fragment is applied to both lexical (`sd`) and semantic (`ev`) queries. The fragment must therefore be valid in both SQL scopes. If policy needs backend-qualified aliases, issue explicit lexical/semantic calls with the matching fragment until channel-specific filter options are available.
 
 Language strictness:
 
@@ -270,6 +290,46 @@ Query syntax notes:
 - SearchKit does **not** treat leading `-term` as an operator. Leading `-` is treated as punctuation (so `-factor` behaves like `factor`).
 - For Postgres FTS (`websearch_to_tsquery`), SearchKit normalizes intra-token hyphens to spaces so tokens like `two-factor` behave like `two factor`.
 - Natural-language negation: for FTS only, `not X` is rewritten to `-X` before it reaches Postgres. This is a convenience for users typing normal phrases like `X not Y`.
+
+## Offline search evaluation
+
+Package `searchkit/eval` provides host-neutral golden-query evaluation:
+
+- graded judgments (`0..3`) and exact-empty cases;
+- recall@K, success@K, MRR@K, nDCG@K, and result-count metrics;
+- versioned reports with dataset, suite, and candidate identities;
+- caller-configured baseline tolerances;
+- exact score-floor candidate generation and sweeps isolated by score domain.
+
+Hosts still own corpus snapshots, business-policy fixtures, query execution, and production acceptance thresholds. Execution failures must be represented with `eval.Failed`; they are never treated as successful empty results.
+
+```go
+suite, err := eval.ParseSuite(fixture)
+if err != nil {
+  return err
+}
+
+outcome, err := eval.Evaluate(suite.Cases[0], []eval.Result{
+  {Key: eval.GoldenKey{EntityType: "gallery", EntityID: "42"}, Score: 0.81},
+})
+if err != nil {
+  return err
+}
+
+report, err := eval.BuildReport(eval.ReportIdentity{
+  DatasetID: "corpus-snapshot-sha256",
+  SuiteID: "suite-sha256",
+  CandidateID: "searchkit-and-config-sha256",
+}, []eval.Outcome{outcome}, "suite")
+```
+
+Quality metrics exclude execution failures from their denominators, while `FailedCases` remains explicit. `QualityStatus` distinguishes hits, misses, exact emptiness, unexpected results, and unjudged cases. Pass only stable lowercase identifier categories such as `timeout` or `semantic_search` to `eval.Failed`; unsafe categories normalize to `unspecified`. Reports include a deterministic content identity covering report identity, outcomes, ordered results, and scores. Baseline comparison validates that identity, report aggregates, and exact case definitions before comparing metrics. Floor sweeps require every outcome, including failures, to carry one matching `score_domain` label and accept `context.Context` for cancellation.
+
+Before releasing changes to search retrieval or evaluation, run the PostgreSQL integration gate in addition to normal tests. Point it at a disposable test database: the test creates extensions and an isolated uniquely named schema, then removes that schema.
+
+```bash
+SEARCHKIT_TEST_URL='postgres://...' go test -count=1 -run TestClientSearch_Integration_LexicalAndSemantic .
+```
 
 Host integration details (contract, filter-builder patterns, hentai0/doujins examples):
 

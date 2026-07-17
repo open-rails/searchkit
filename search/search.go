@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -49,6 +50,10 @@ type Options struct {
 	FilterArgs map[string]any
 }
 
+const (
+	MaxCandidateLimit = 10_000
+)
+
 type Query struct {
 	Schema     string
 	Model      string
@@ -57,6 +62,14 @@ type Query struct {
 	Limit      int
 	Dimensions int // required for TwoStage; defaults to len(QueryVec) when 0
 	Options    Options
+}
+
+// EffectiveOversampleFactor returns the factor used by two-stage retrieval.
+func EffectiveOversampleFactor(factor int) int {
+	if factor <= 1 {
+		return 5
+	}
+	return factor
 }
 
 func quoteIdent(ident string) (string, error) {
@@ -96,6 +109,9 @@ func mergeNamedArgs(dst pgx.NamedArgs, extra map[string]any) error {
 // This function intentionally does not hydrate domain rows or apply business
 // logic beyond basic filtering options.
 func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, error) {
+	if math.IsNaN(float64(q.Options.MinSimilarity)) || math.IsInf(float64(q.Options.MinSimilarity), 0) {
+		return nil, fmt.Errorf("min similarity must be finite")
+	}
 	if pool == nil {
 		return nil, fmt.Errorf("pool is required")
 	}
@@ -129,9 +145,10 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 	table := quotedSchema + ".embedding_vectors"
 
 	opts := q.Options
-	if opts.OversampleFactor <= 1 {
-		opts.OversampleFactor = 5
+	if opts.MinSimilarity <= 0 {
+		opts.MinSimilarity = 0
 	}
+	opts.OversampleFactor = EffectiveOversampleFactor(opts.OversampleFactor)
 
 	vec := pgvector.NewHalfVector(q.QueryVec)
 
@@ -170,14 +187,23 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 				(1 - (ev.embedding::%s <=> (@qvec::%s)))::float4 AS similarity
 			FROM %s ev
 			%s
-			ORDER BY ev.embedding::%s <=> (@qvec::%s)
+			ORDER BY ev.embedding::%s <=> (@qvec::%s), ev.entity_type, ev.entity_id, ev.language, ev.model
 			LIMIT @limit
 		`, half, half, table, where, half, half)
 
 		args["qvec"] = vec
 		args["limit"] = q.Limit
 	} else {
+		if q.Limit > int(^uint(0)>>1)/opts.OversampleFactor {
+			return nil, fmt.Errorf("candidate oversample limit overflows int")
+		}
 		oversample := q.Limit * opts.OversampleFactor
+		minSimilarityFilter := ""
+		if opts.MinSimilarity > 0 {
+			minSimilarityFilter = "WHERE (1 - (embedding::%s <=> (@qvec::%s))) >= @min_similarity"
+			minSimilarityFilter = fmt.Sprintf(minSimilarityFilter, half, half)
+			args["min_similarity"] = opts.MinSimilarity
+		}
 
 		// 2-stage:
 		//  - stage 1: approx retrieval using binary quantize (Hamming distance)
@@ -192,7 +218,7 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 						ev.embedding
 					FROM %s ev
 					%s
-					ORDER BY (binary_quantize(embedding::%s)::bit(%d)) <~> (binary_quantize(@qvec::%s)::bit(%d))
+					ORDER BY (binary_quantize(embedding::%s)::bit(%d)) <~> (binary_quantize(@qvec::%s)::bit(%d)), ev.entity_type, ev.entity_id, ev.language, ev.model
 					LIMIT @oversample
 				)
 				SELECT
@@ -202,14 +228,13 @@ func SemanticSearch(ctx context.Context, pool *pgxpool.Pool, q Query) ([]Hit, er
 					language,
 					(1 - (embedding::%s <=> (@qvec::%s)))::float4 AS similarity
 				FROM candidates
-				WHERE (1 - (embedding::%s <=> (@qvec::%s))) >= @min_similarity
-				ORDER BY embedding::%s <=> (@qvec::%s)
+				%s
+				ORDER BY embedding::%s <=> (@qvec::%s), entity_type, entity_id, language, model
 				LIMIT @limit
-			`, table, where, half, dim, half, dim, half, half, half, half, half, half)
+			`, table, where, half, dim, half, dim, half, half, minSimilarityFilter, half, half)
 
 		args["qvec"] = vec
 		args["oversample"] = oversample
-		args["min_similarity"] = opts.MinSimilarity
 		args["limit"] = q.Limit
 	}
 
@@ -308,7 +333,7 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 			(1 - (ev.embedding <=> s.embedding))::float4 AS similarity
 		FROM %s ev, source s
 		%s
-		ORDER BY ev.embedding <=> s.embedding
+		ORDER BY ev.embedding <=> s.embedding, ev.entity_type, ev.entity_id, ev.language, ev.model
 		LIMIT @limit
 	`, table, table, where)
 
