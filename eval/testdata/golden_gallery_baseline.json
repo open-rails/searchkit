@@ -1,0 +1,275 @@
+{
+  "schema_version": 1,
+  "identity": {
+    "dataset_id": "gallery-smoke",
+    "suite_id": "gallery-smoke-v1",
+    "candidate_id": "dual+floor0.5"
+  },
+  "content_id": "sha256:1081350a65f466103c69b85701ed154a5c199a4c18f86315ca186074aae07576",
+  "group_labels": [
+    "query_type"
+  ],
+  "metrics": {
+    "cases": 4,
+    "successful_cases": 4,
+    "failed_cases": 0,
+    "judged_cases": 3,
+    "empty_cases": 1,
+    "recall_at_k": 1,
+    "success_at_k": 1,
+    "mrr_at_k": 1,
+    "ndcg_at_k": 1,
+    "exact_empty_rate": 1,
+    "min_results": 0,
+    "max_results": 2,
+    "mean_results": 1.5,
+    "median_results": 2
+  },
+  "breakdowns": {
+    "query_type": {
+      "keyword": {
+        "cases": 2,
+        "successful_cases": 2,
+        "failed_cases": 0,
+        "judged_cases": 2,
+        "empty_cases": 0,
+        "recall_at_k": 1,
+        "success_at_k": 1,
+        "mrr_at_k": 1,
+        "ndcg_at_k": 1,
+        "exact_empty_rate": 0,
+        "min_results": 2,
+        "max_results": 2,
+        "mean_results": 2,
+        "median_results": 2
+      },
+      "nonsense": {
+        "cases": 1,
+        "successful_cases": 1,
+        "failed_cases": 0,
+        "judged_cases": 0,
+        "empty_cases": 1,
+        "recall_at_k": 0,
+        "success_at_k": 0,
+        "mrr_at_k": 0,
+        "ndcg_at_k": 0,
+        "exact_empty_rate": 1,
+        "min_results": 0,
+        "max_results": 0,
+        "mean_results": 0,
+        "median_results": 0
+      },
+      "phrase": {
+        "cases": 1,
+        "successful_cases": 1,
+        "failed_cases": 0,
+        "judged_cases": 1,
+        "empty_cases": 0,
+        "recall_at_k": 1,
+        "success_at_k": 1,
+        "mrr_at_k": 1,
+        "ndcg_at_k": 1,
+        "exact_empty_rate": 0,
+        "min_results": 2,
+        "max_results": 2,
+        "mean_results": 2,
+        "median_results": 2
+      }
+    }
+  },
+  "outcomes": [
+    {
+      "status": "success",
+      "quality_status": "hit",
+      "case": {
+        "id": "authentication",
+        "query": "authentication",
+        "language": "en",
+        "entity_types": [
+          "gallery"
+        ],
+        "k": 5,
+        "judgments": [
+          {
+            "key": {
+              "entity_type": "gallery",
+              "entity_id": "1"
+            },
+            "relevance": 3
+          },
+          {
+            "key": {
+              "entity_type": "gallery",
+              "entity_id": "2"
+            },
+            "relevance": 1
+          }
+        ],
+        "labels": {
+          "query_type": "keyword",
+          "score_domain": "fused"
+        }
+      },
+      "results": [
+        {
+          "key": {
+            "entity_type": "gallery",
+            "entity_id": "1"
+          },
+          "score": 0.032786883
+        },
+        {
+          "key": {
+            "entity_type": "gallery",
+            "entity_id": "2"
+          },
+          "score": 0.016129032
+        }
+      ],
+      "result_count": 2,
+      "judged": true,
+      "recall_at_k": 1,
+      "success_at_k": 1,
+      "reciprocal_rank": 1,
+      "ndcg_at_k": 1,
+      "empty_expected": false,
+      "exact_empty": false
+    },
+    {
+      "status": "success",
+      "quality_status": "exact_empty",
+      "case": {
+        "id": "nonsense-empty",
+        "query": "zzzq nonexistent",
+        "language": "en",
+        "entity_types": [
+          "gallery"
+        ],
+        "k": 5,
+        "expect_empty": true,
+        "labels": {
+          "query_type": "nonsense",
+          "score_domain": "fused"
+        }
+      },
+      "result_count": 0,
+      "judged": false,
+      "empty_expected": true,
+      "exact_empty": true
+    },
+    {
+      "status": "success",
+      "quality_status": "hit",
+      "case": {
+        "id": "single-sign-on",
+        "query": "single sign on",
+        "language": "en",
+        "entity_types": [
+          "gallery"
+        ],
+        "k": 5,
+        "judgments": [
+          {
+            "key": {
+              "entity_type": "gallery",
+              "entity_id": "3"
+            },
+            "relevance": 3
+          },
+          {
+            "key": {
+              "entity_type": "gallery",
+              "entity_id": "4"
+            },
+            "relevance": 2
+          }
+        ],
+        "labels": {
+          "query_type": "phrase",
+          "score_domain": "fused"
+        }
+      },
+      "results": [
+        {
+          "key": {
+            "entity_type": "gallery",
+            "entity_id": "3"
+          },
+          "score": 0.032786883
+        },
+        {
+          "key": {
+            "entity_type": "gallery",
+            "entity_id": "4"
+          },
+          "score": 0.016129032
+        }
+      ],
+      "result_count": 2,
+      "judged": true,
+      "recall_at_k": 1,
+      "success_at_k": 1,
+      "reciprocal_rank": 1,
+      "ndcg_at_k": 1,
+      "empty_expected": false,
+      "exact_empty": false
+    },
+    {
+      "status": "success",
+      "quality_status": "hit",
+      "case": {
+        "id": "two-factor",
+        "query": "two factor",
+        "language": "en",
+        "entity_types": [
+          "gallery"
+        ],
+        "k": 5,
+        "judgments": [
+          {
+            "key": {
+              "entity_type": "gallery",
+              "entity_id": "1"
+            },
+            "relevance": 3
+          },
+          {
+            "key": {
+              "entity_type": "gallery",
+              "entity_id": "2"
+            },
+            "relevance": 2
+          }
+        ],
+        "labels": {
+          "query_type": "keyword",
+          "score_domain": "fused"
+        }
+      },
+      "results": [
+        {
+          "key": {
+            "entity_type": "gallery",
+            "entity_id": "1"
+          },
+          "score": 0.032786883
+        },
+        {
+          "key": {
+            "entity_type": "gallery",
+            "entity_id": "2"
+          },
+          "score": 0.032258064
+        }
+      ],
+      "result_count": 2,
+      "judged": true,
+      "recall_at_k": 1,
+      "success_at_k": 1,
+      "reciprocal_rank": 1,
+      "ndcg_at_k": 1,
+      "empty_expected": false,
+      "exact_empty": false
+    }
+  ]
+}

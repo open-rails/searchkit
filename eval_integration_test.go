@@ -16,6 +16,13 @@ import (
 	"github.com/open-rails/searchkit/eval"
 )
 
+const (
+	// evalBaselinePath is the committed golden report the regression gate
+	// compares against. Regenerate with SEARCHKIT_EVAL_UPDATE=1.
+	evalBaselinePath = "eval/testdata/golden_gallery_baseline.json"
+	evalUpdateEnv    = "SEARCHKIT_EVAL_UPDATE"
+)
+
 // mapEmbedder is a deterministic, query-aware stub: it maps known query text to
 // a fixed vector so semantic ranking is reproducible across cases. An unknown
 // query fails loudly rather than silently embedding to a zero vector.
@@ -38,14 +45,11 @@ type seedDoc struct {
 	vec []float32
 }
 
-// TestEvalRunSuite_Integration runs the committed golden suite through
-// client.Search against a real Postgres and asserts the resulting report is a
-// clean baseline: every judged case is a hit, the nonsense case stays empty
-// (the semantic floor filters its low-cosine tail), and nDCG stays high.
-//
-// This is the end-to-end proof that the eval engine actually measures search —
-// the piece that was previously missing.
-func TestEvalRunSuite_Integration(t *testing.T) {
+// newEvalTestClient provisions an isolated schema, seeds a small deterministic
+// corpus, and returns a client wired to a query-aware embedder. Shared by the
+// baseline-gate and config-diff tests so the corpus stays identical.
+func newEvalTestClient(t *testing.T) (context.Context, *Client) {
+	t.Helper()
 	dsn := os.Getenv("SEARCHKIT_TEST_URL")
 	if dsn == "" {
 		t.Skip("SEARCHKIT_TEST_URL not set")
@@ -139,31 +143,52 @@ func TestEvalRunSuite_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
+	return ctx, client
+}
 
-	suiteFile, err := os.Open("eval/testdata/golden_gallery.json")
+func loadGoldenSuite(t *testing.T) eval.Suite {
+	t.Helper()
+	f, err := os.Open("eval/testdata/golden_gallery.json")
 	if err != nil {
 		t.Fatalf("open golden suite: %v", err)
 	}
-	t.Cleanup(func() { _ = suiteFile.Close() })
-	suite, err := eval.ParseSuite(suiteFile)
+	t.Cleanup(func() { _ = f.Close() })
+	suite, err := eval.ParseSuite(f)
 	if err != nil {
 		t.Fatalf("parse golden suite: %v", err)
 	}
+	return suite
+}
 
-	// Dual mode with a semantic floor: the floor removes the low-cosine tail so
-	// the nonsense query returns nothing instead of polluting with neighbors.
+// runGolden executes the golden suite under one search configuration and builds
+// a report. floor <= 0 disables the semantic floor.
+func runGolden(ctx context.Context, t *testing.T, client *Client, suite eval.Suite, candidateID string, floor float32) eval.Report {
+	t.Helper()
 	runner := NewEvalRunner(client, SearchOptions{
 		Mode:                  SearchModeDual,
 		Language:              "en",
-		SemanticMinSimilarity: 0.5,
+		SemanticMinSimilarity: floor,
 		RRFK:                  60,
 	})
-	identity := eval.ReportIdentity{DatasetID: "gallery-smoke", SuiteID: suite.ID, CandidateID: "dual+floor0.5"}
-
+	identity := eval.ReportIdentity{DatasetID: "gallery-smoke", SuiteID: suite.ID, CandidateID: candidateID}
 	report, err := eval.RunSuite(ctx, suite, runner, identity, "query_type")
 	if err != nil {
-		t.Fatalf("RunSuite: %v", err)
+		t.Fatalf("RunSuite(%s): %v", candidateID, err)
 	}
+	return report
+}
+
+// TestEvalRunSuite_Integration runs the committed golden suite through
+// client.Search against a real Postgres, asserts a clean baseline, and gates on
+// the committed baseline report so a future quality regression fails CI.
+// Regenerate the baseline with SEARCHKIT_EVAL_UPDATE=1.
+func TestEvalRunSuite_Integration(t *testing.T) {
+	ctx, client := newEvalTestClient(t)
+	suite := loadGoldenSuite(t)
+
+	// Dual mode with a semantic floor: the floor removes the low-cosine tail so
+	// the nonsense query returns nothing instead of polluting with neighbors.
+	report := runGolden(ctx, t, client, suite, "dual+floor0.5", 0.5)
 
 	if report.Metrics.Cases != 4 {
 		t.Fatalf("Cases = %d, want 4", report.Metrics.Cases)
@@ -190,12 +215,103 @@ func TestEvalRunSuite_Integration(t *testing.T) {
 	if _, ok := report.Breakdowns["query_type"]; !ok {
 		t.Fatalf("missing query_type breakdown: %+v", report.Breakdowns)
 	}
-
-	// The report must be serializable and self-consistent (ContentID present).
 	if report.ContentID == "" {
 		t.Fatal("report ContentID is empty")
 	}
-	if _, err := json.Marshal(report); err != nil {
-		t.Fatalf("marshal report: %v", err)
+
+	// Golden-file regression gate: update on demand, otherwise compare.
+	if os.Getenv(evalUpdateEnv) != "" {
+		writeBaselineReport(t, evalBaselinePath, report)
+		t.Logf("wrote baseline %s (SEARCHKIT_EVAL_UPDATE set)", evalBaselinePath)
+		return
+	}
+	baseline := loadReport(t, evalBaselinePath)
+	tolerances := eval.Tolerances{
+		RecallAtKDrop:      0,
+		SuccessAtKDrop:     0,
+		MRRAtKDrop:         0.05,
+		NDCGAtKDrop:        0.05,
+		ExactEmptyRateDrop: 0,
+		FailedCaseIncrease: 0,
+	}
+	comparison, err := eval.Compare(baseline, report, tolerances)
+	if err != nil {
+		t.Fatalf("Compare(baseline, current): %v", err)
+	}
+	if !comparison.Compatible {
+		t.Fatalf("baseline incompatible with current report (regenerate with %s=1): %v", evalUpdateEnv, comparison.Mismatches)
+	}
+	if comparison.Regressed() {
+		t.Fatalf("search quality regressed vs committed baseline: %+v", comparison.Regressions)
+	}
+}
+
+// TestEvalConfigDiff_Integration proves the eval can compare two configurations
+// side by side: disabling the semantic floor regresses exact-empty-rate because
+// the nonsense query's low-cosine tail is no longer filtered.
+func TestEvalConfigDiff_Integration(t *testing.T) {
+	ctx, client := newEvalTestClient(t)
+	suite := loadGoldenSuite(t)
+
+	floorOn := runGolden(ctx, t, client, suite, "dual+floor0.5", 0.5)
+	floorOff := runGolden(ctx, t, client, suite, "dual+nofloor", 0)
+
+	// Ground the claim directly: the floor keeps the nonsense case empty; without
+	// it the semantic tail leaks in.
+	if floorOn.Metrics.ExactEmptyRate != 1 {
+		t.Fatalf("floor-on ExactEmptyRate = %v, want 1", floorOn.Metrics.ExactEmptyRate)
+	}
+	if floorOff.Metrics.ExactEmptyRate != 0 {
+		t.Fatalf("floor-off ExactEmptyRate = %v, want 0 (semantic tail should leak without the floor)", floorOff.Metrics.ExactEmptyRate)
+	}
+
+	// The comparator must flag floor-off as a regression against floor-on.
+	strict := eval.Tolerances{} // zero tolerance on every metric
+	comparison, err := eval.Compare(floorOn, floorOff, strict)
+	if err != nil {
+		t.Fatalf("Compare(floorOn, floorOff): %v", err)
+	}
+	if !comparison.Compatible {
+		t.Fatalf("floor-on and floor-off reports should be comparable: %v", comparison.Mismatches)
+	}
+	if !comparison.Regressed() {
+		t.Fatal("expected floor-off to regress vs floor-on, comparator saw none")
+	}
+	var sawEmptyRate bool
+	for _, r := range comparison.Regressions {
+		if r.Metric == "exact_empty_rate" {
+			sawEmptyRate = true
+		}
+	}
+	if !sawEmptyRate {
+		t.Fatalf("expected an exact_empty_rate regression, got %+v", comparison.Regressions)
+	}
+}
+
+func loadReport(t *testing.T, path string) eval.Report {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open baseline %s (generate with %s=1): %v", path, evalUpdateEnv, err)
+	}
+	defer func() { _ = f.Close() }()
+	var report eval.Report
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&report); err != nil {
+		t.Fatalf("decode baseline %s: %v", path, err)
+	}
+	return report
+}
+
+func writeBaselineReport(t *testing.T, path string, report eval.Report) {
+	t.Helper()
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal baseline: %v", err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("write baseline %s: %v", path, err)
 	}
 }
