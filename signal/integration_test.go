@@ -142,6 +142,88 @@ func TestIntegrationStateLifecycleAndReplay(t *testing.T) {
 	}
 }
 
+// insertRawEvent appends an event straight to the stream WITHOUT reprojecting
+// state — reproducing the residue of a crash between RecordSignal's two steps.
+func insertRawEvent(t *testing.T, conn Conn, tenant, entityID string, sub Subject, eventID string, occurredAt time.Time, progress, progressMax uint32, score int16, completed bool, resume string) {
+	t.Helper()
+	q := fmt.Sprintf(`INSERT INTO %s.signal_events
+(tenant, entity_type, entity_id, subject_kind, subject, signal_type, event_id, occurred_at,
+ duration_s, progress, progress_max, value, label, weight, score, completed, resume, payload)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, testDB)
+	if err := conn.Exec(context.Background(), q,
+		tenant, "gallery", entityID, sub.Kind(), sub.Key(), "view", eventID, occurredAt.UTC(),
+		uint32(0), progress, progressMax, float64(0), "", float64(1), score, completed, resume, "",
+	); err != nil {
+		t.Fatalf("insert raw event %s: %v", eventID, err)
+	}
+}
+
+func TestIntegrationReprojectStaleHealsState(t *testing.T) {
+	st, conn := freshStore(t)
+	ctx := context.Background()
+	tenant := "doujins"
+	user := Subject{UserID: "u1"}
+
+	// Validation guards.
+	if _, err := st.ReprojectStale(ctx, "", StaleStateOptions{}); err == nil {
+		t.Fatal("ReprojectStale with empty tenant must error")
+	}
+	if _, err := st.ReprojectStale(ctx, tenant, StaleStateOptions{Limit: -1}); err == nil {
+		t.Fatal("ReprojectStale with negative limit must error")
+	}
+
+	// g1: recorded normally (state healthy at total_events=1), then a second
+	// distinct event lands in the stream without reprojection (crash residue).
+	if err := st.RecordSignal(ctx, tenant, view("g1", user, 1, 10, 5, 20, 30, false)); err != nil {
+		t.Fatal(err)
+	}
+	insertRawEvent(t, conn, tenant, "g1", user, "g1-evt-2", at(2, 11), 19, 20, 90, true, "p:19")
+	// g2: only a raw event, never RecordSignal'd — its state row is missing.
+	insertRawEvent(t, conn, tenant, "g2", user, "g2-evt-1", at(3, 9), 7, 20, 40, false, "p:7")
+
+	ref1 := EntityRef{EntityType: "gallery", EntityID: "g1"}
+	ref2 := EntityRef{EntityType: "gallery", EntityID: "g2"}
+
+	pre, err := st.States(ctx, tenant, user, []EntityRef{ref1, ref2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pre[ref1].TotalEvents != 1 {
+		t.Fatalf("precondition: g1 total_events=%d want 1 (stale)", pre[ref1].TotalEvents)
+	}
+	if _, ok := pre[ref2]; ok {
+		t.Fatalf("precondition: g2 state should be missing, got %+v", pre[ref2])
+	}
+
+	healed, err := st.ReprojectStale(ctx, tenant, StaleStateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healed != 2 {
+		t.Fatalf("healed=%d want 2 (g1 lag + g2 missing)", healed)
+	}
+
+	post, err := st.States(ctx, tenant, user, []EntityRef{ref1, ref2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post[ref1].TotalEvents != 2 || !post[ref1].LastSignalAt.Equal(at(2, 11)) {
+		t.Fatalf("g1 not healed: %+v", post[ref1])
+	}
+	if s2, ok := post[ref2]; !ok || s2.TotalEvents != 1 || !s2.LastSignalAt.Equal(at(3, 9)) {
+		t.Fatalf("g2 not healed: %+v (ok=%v)", s2, ok)
+	}
+
+	// Idempotent: a second sweep is a no-op.
+	healed, err = st.ReprojectStale(ctx, tenant, StaleStateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if healed != 0 {
+		t.Fatalf("second sweep healed=%d want 0 (no-op)", healed)
+	}
+}
+
 func TestIntegrationAnonVsUserSubjects(t *testing.T) {
 	st, _ := freshStore(t)
 	ctx := context.Background()
