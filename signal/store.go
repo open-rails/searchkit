@@ -205,6 +205,115 @@ GROUP BY tenant, subject_kind, subject, entity_type, entity_id`, st.db, st.db)
 	return nil
 }
 
+// StaleStateOptions bounds a reprojection-heal sweep.
+type StaleStateOptions struct {
+	// Since restricts detection to keys with an event at or after this instant,
+	// which bounds the scan. Zero considers the tenant's whole event stream.
+	Since time.Time
+	// Limit caps how many lagging keys are reprojected in one call. Zero means
+	// no cap.
+	Limit int
+}
+
+// ReprojectStale repairs durable current-state that has fallen behind the event
+// stream — the residual risk of RecordSignal's non-atomic "insert event, then
+// reproject state" sequence. If the process dies between the two, the event is
+// durable but the state row is stale and only self-heals when the next signal
+// for that key arrives; a key that never gets another signal stays stale.
+//
+// It finds keys whose state is missing or lags (state total_events below the
+// stream's deduplicated count, or last_signal_at behind) and reprojects each
+// from the deduplicated event stream via reprojectState. It is idempotent and a
+// no-op when every key is current, and is intended to run periodically
+// (host-triggered, like RefreshCoEngagement). Returns the number of keys healed.
+func (st *Store) ReprojectStale(ctx context.Context, tenant string, opts StaleStateOptions) (int, error) {
+	if strings.TrimSpace(tenant) == "" {
+		return 0, fmt.Errorf("signal: tenant is required")
+	}
+	if opts.Limit < 0 {
+		return 0, fmt.Errorf("signal: limit must not be negative")
+	}
+
+	args := []any{tenant}
+	sinceFilter := ""
+	if !opts.Since.IsZero() {
+		sinceFilter = " AND occurred_at >= ?"
+		args = append(args, opts.Since.UTC())
+	}
+	args = append(args, tenant) // state subquery tenant
+	limitClause := ""
+	if opts.Limit > 0 {
+		limitClause = " LIMIT ?"
+		args = append(args, opts.Limit)
+	}
+
+	// Left side is the event stream, so only keys that actually have events are
+	// considered; the LEFT JOIN yields zero-valued state defaults for keys with
+	// no state row, which the WHERE then flags as lagging.
+	q := fmt.Sprintf(`
+SELECT e.entity_type, e.entity_id, e.subject_kind, e.subject
+FROM (
+    SELECT entity_type, entity_id, subject_kind, subject,
+           max(occurred_at) AS ev_last, toUInt32(uniqExact(event_id)) AS ev_count
+    FROM %s.signal_events
+    WHERE tenant = ?%s
+    GROUP BY entity_type, entity_id, subject_kind, subject
+) AS e
+LEFT JOIN (
+    SELECT entity_type, entity_id, subject_kind, subject,
+           argMax(last_signal_at, last_updated) AS st_last,
+           argMax(total_events, last_updated) AS st_count
+    FROM %s.signal_state
+    WHERE tenant = ?
+    GROUP BY entity_type, entity_id, subject_kind, subject
+) AS s USING (entity_type, entity_id, subject_kind, subject)
+WHERE e.ev_count != s.st_count OR e.ev_last > s.st_last
+ORDER BY e.entity_type, e.entity_id, e.subject_kind, e.subject%s`,
+		st.db, sinceFilter, st.db, limitClause)
+
+	rows, err := st.conn.Query(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("signal: detect stale states: %w", err)
+	}
+	type laggingKey struct{ entityType, entityID, subjectKind, subject string }
+	var keys []laggingKey
+	for rows.Next() {
+		var k laggingKey
+		if err := rows.Scan(&k.entityType, &k.entityID, &k.subjectKind, &k.subject); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("signal: scan stale key: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("signal: iterate stale keys: %w", err)
+	}
+	rows.Close()
+
+	healed := 0
+	for _, k := range keys {
+		if err := ctx.Err(); err != nil {
+			return healed, err
+		}
+		ref := EntityRef{EntityType: k.entityType, EntityID: k.entityID}
+		if err := st.reprojectState(ctx, tenant, subjectFromKey(k.subjectKind, k.subject), ref); err != nil {
+			return healed, fmt.Errorf("signal: reproject stale key (%s/%s, %s:%s): %w",
+				k.entityType, k.entityID, k.subjectKind, k.subject, err)
+		}
+		healed++
+	}
+	return healed, nil
+}
+
+// subjectFromKey rebuilds a Subject from its stored (kind, key) columns.
+func subjectFromKey(kind, key string) Subject {
+	if kind == SubjectKindUser {
+		return Subject{UserID: key}
+	}
+	return Subject{AnonKey: key}
+}
+
 const stateColumns = `entity_type, entity_id, first_seen_at, last_signal_at, total_events,
  max_progress, progress_max, completed, resume, has_interacted, last_score, net_value`
 

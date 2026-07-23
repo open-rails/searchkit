@@ -504,6 +504,18 @@ func (h *EmbeddedHub) RefreshCoEngagement(ctx context.Context, opts signal.Refre
 	return store.RefreshCoEngagement(ctx, h.tenant, opts)
 }
 
+// ReprojectStaleStates repairs durable current-state that has fallen behind the
+// event stream (see signal.Store.ReprojectStale for the failure it heals).
+// Embedded-only maintenance, intended to run periodically like
+// RefreshCoEngagement; returns the number of (subject, entity) keys healed.
+func (h *EmbeddedHub) ReprojectStaleStates(ctx context.Context, opts signal.StaleStateOptions) (int, error) {
+	store, err := h.requireStore()
+	if err != nil {
+		return 0, err
+	}
+	return store.ReprojectStale(ctx, h.tenant, opts)
+}
+
 // --- Signal plane ---
 
 // RecordSignal applies the entity type's registered Scorer (if any), then
