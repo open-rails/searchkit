@@ -39,6 +39,10 @@ type Runtime struct {
 	textEmbedders map[string]embedder.Embedder
 	vlEmbedders   map[string]vl.Embedder
 
+	// queryInstructions maps a text model to its query instruction prefix; only
+	// non-blank, validated entries are stored. Applied in EmbedQueryText only.
+	queryInstructions map[string]string
+
 	taskRepo *tasks.Repo
 	storage  *pg.PostgresStorage
 
@@ -55,6 +59,14 @@ type Options struct {
 	// One embedder instance per enabled model.
 	TextEmbedders []embedder.Embedder
 	VLEmbedders   []vl.Embedder
+
+	// QueryInstructions optionally maps a text model name to an instruction
+	// prefix applied to QUERY text only (never to documents). Instruction-trained
+	// models such as Qwen3-Embedding expect queries as
+	// "Instruct: {task}\nQuery: {query}" while documents stay bare; a missing or
+	// blank entry preserves current behavior (no prefix). Keys must name a
+	// configured text model.
+	QueryInstructions map[string]string
 
 	// Required.
 	BuildSemanticDocument BuildSemanticDocument
@@ -116,6 +128,19 @@ func New(opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("vl embedder provided but ListAssetURLs missing")
 	}
 
+	queryInstructions := make(map[string]string, len(opts.QueryInstructions))
+	for model, instruction := range opts.QueryInstructions {
+		model = strings.TrimSpace(model)
+		instruction = strings.TrimSpace(instruction)
+		if model == "" || instruction == "" {
+			continue
+		}
+		if _, ok := textMap[model]; !ok {
+			return nil, fmt.Errorf("query instruction references unknown text model %q", model)
+		}
+		queryInstructions[model] = instruction
+	}
+
 	repo := opts.TaskRepo
 	if repo == nil {
 		repo = tasks.NewRepo(opts.Pool, opts.Schema)
@@ -126,9 +151,10 @@ func New(opts Options) (*Runtime, error) {
 	}
 
 	return &Runtime{
-		textEmbedders: textMap,
-		vlEmbedders:   vlMap,
-		taskRepo:      repo,
+		textEmbedders:     textMap,
+		vlEmbedders:       vlMap,
+		queryInstructions: queryInstructions,
+		taskRepo:          repo,
 		storage:       store,
 		buildSemantic: opts.BuildSemanticDocument,
 		buildLexical:  opts.BuildLexicalString,
@@ -249,16 +275,29 @@ func (r *Runtime) IsVLModel(model string) bool {
 //
 // This is intended for host apps calling SemanticSearch at request time.
 func (r *Runtime) EmbedQueryText(ctx context.Context, model string, text string) ([]float32, error) {
-	emb, ok := r.textEmbedders[strings.TrimSpace(model)]
+	model = strings.TrimSpace(model)
+	emb, ok := r.textEmbedders[model]
 	if !ok {
 		return nil, fmt.Errorf("model %q is not configured for text embeddings", model)
 	}
-	vec, err := emb.EmbedText(ctx, text)
+	vec, err := emb.EmbedText(ctx, r.queryTextFor(model, text))
 	if err != nil {
 		return nil, err
 	}
 	normalize.L2NormalizeInPlace(vec)
 	return vec, nil
+}
+
+// queryTextFor prefixes query text with the model's configured instruction, if
+// any. This is the ONLY place instructions are applied; document/worker
+// embedding paths call EmbedText directly, so stored document vectors stay bare
+// and existing indexes need no rebuild.
+func (r *Runtime) queryTextFor(model string, text string) string {
+	instruction := r.queryInstructions[model]
+	if instruction == "" {
+		return text
+	}
+	return fmt.Sprintf("Instruct: %s\nQuery: %s", instruction, text)
 }
 
 type TextEmbeddingItem struct {
