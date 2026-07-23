@@ -1,0 +1,50 @@
+{
+  "id": "gallery-smoke-v1",
+  "cases": [
+    {
+      "id": "two-factor",
+      "query": "two factor",
+      "language": "en",
+      "entity_types": ["gallery"],
+      "k": 5,
+      "labels": {"score_domain": "fused", "query_type": "keyword"},
+      "judgments": [
+        {"key": {"entity_type": "gallery", "entity_id": "1"}, "relevance": 3},
+        {"key": {"entity_type": "gallery", "entity_id": "2"}, "relevance": 2}
+      ]
+    },
+    {
+      "id": "single-sign-on",
+      "query": "single sign on",
+      "language": "en",
+      "entity_types": ["gallery"],
+      "k": 5,
+      "labels": {"score_domain": "fused", "query_type": "phrase"},
+      "judgments": [
+        {"key": {"entity_type": "gallery", "entity_id": "3"}, "relevance": 3},
+        {"key": {"entity_type": "gallery", "entity_id": "4"}, "relevance": 2}
+      ]
+    },
+    {
+      "id": "authentication",
+      "query": "authentication",
+      "language": "en",
+      "entity_types": ["gallery"],
+      "k": 5,
+      "labels": {"score_domain": "fused", "query_type": "keyword"},
+      "judgments": [
+        {"key": {"entity_type": "gallery", "entity_id": "1"}, "relevance": 3},
+        {"key": {"entity_type": "gallery", "entity_id": "2"}, "relevance": 1}
+      ]
+    },
+    {
+      "id": "nonsense-empty",
+      "query": "zzzq nonexistent",
+      "language": "en",
+      "entity_types": ["gallery"],
+      "k": 5,
+      "expect_empty": true,
+      "labels": {"score_domain": "fused", "query_type": "nonsense"}
+    }
+  ]
+}

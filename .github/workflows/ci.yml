@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # pgvector image ships both the `vector` and `pg_trgm` extensions the
+        # integration tests self-provision.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: searchkit
+          POSTGRES_PASSWORD: searchkit
+          POSTGRES_DB: searchkit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U searchkit"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Drives the env-gated integration tests (client, hub, eval). Without it
+      # they skip; with it they run against the service above.
+      SEARCHKIT_TEST_URL: postgres://searchkit:searchkit@localhost:5432/searchkit_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./... -count=1 -race
