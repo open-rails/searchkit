@@ -26,10 +26,30 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      clickhouse:
+        # Drives the signal-plane and hub integration tests (event stream,
+        # current-state reprojection, popular/recommend, dedup).
+        image: clickhouse/clickhouse-server:latest
+        env:
+          CLICKHOUSE_USER: searchkit
+          CLICKHOUSE_PASSWORD: searchkit
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "clickhouse-client --user searchkit --password searchkit --query 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
     env:
-      # Drives the env-gated integration tests (client, hub, eval). Without it
-      # they skip; with it they run against the service above.
+      # Drive the env-gated integration tests. Without these they skip; with them
+      # they run against the services above (Postgres: client/eval; ClickHouse +
+      # Postgres: signal/hub).
       SEARCHKIT_TEST_URL: postgres://searchkit:searchkit@localhost:5432/searchkit_test?sslmode=disable
+      SEARCHKIT_TEST_CH_ADDR: localhost:9000
+      SEARCHKIT_TEST_CH_USER: searchkit
+      SEARCHKIT_TEST_CH_PASSWORD: searchkit
 
     steps:
       - uses: actions/checkout@v4
