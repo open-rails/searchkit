@@ -87,9 +87,12 @@ type Signal struct {
 	// Type is HOST-DEFINED: "view" | "rate" | "purchase" | "listen" | ...
 	Type string
 
-	// EventID is an optional idempotency key. When empty, a deterministic
-	// hash of (entity, subject, type, occurred_at) is used, so re-delivering
-	// the same event deduplicates instead of double-counting.
+	// EventID is an optional idempotency key. When empty, a deterministic hash
+	// of (entity, subject, type, occurred_at at nanosecond precision) is used:
+	// re-delivering an event that carries the same OccurredAt deduplicates,
+	// while genuinely distinct interactions within the same wall-clock second
+	// stay distinct. Hosts wanting idempotency independent of timing should set
+	// EventID explicitly.
 	EventID string
 
 	OccurredAt time.Time
@@ -142,7 +145,7 @@ func (s Signal) eventID() string {
 	}
 	h := sha256.Sum256([]byte(strings.Join([]string{
 		s.EntityType, s.EntityID, s.Subject.Kind(), s.Subject.Key(),
-		s.Type, fmt.Sprintf("%d", s.OccurredAt.UTC().Unix()),
+		s.Type, fmt.Sprintf("%d", s.OccurredAt.UTC().UnixNano()),
 	}, "\x1f")))
 	return hex.EncodeToString(h[:16])
 }

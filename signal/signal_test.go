@@ -50,6 +50,28 @@ func TestEventIDDeterministic(t *testing.T) {
 	}
 }
 
+// TestEventIDDistinguishesSubSecond guards against the same-second collapse:
+// two distinct interactions sharing (entity, subject, type) and the same
+// wall-clock second must not hash to the same default event id.
+func TestEventIDDistinguishesSubSecond(t *testing.T) {
+	base := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	s1 := Signal{
+		EntityRef:  EntityRef{EntityType: "blog_post", EntityID: "42"},
+		Subject:    Subject{UserID: "u1"},
+		Type:       "view",
+		OccurredAt: base,
+	}
+	s2 := s1
+	s2.OccurredAt = base.Add(5 * time.Millisecond)
+
+	if s1.OccurredAt.Unix() != s2.OccurredAt.Unix() {
+		t.Fatal("test setup: both timestamps must share the same wall-clock second")
+	}
+	if s1.eventID() == s2.eventID() {
+		t.Fatal("distinct sub-second interactions must produce different event ids")
+	}
+}
+
 func TestWindowDayAligned(t *testing.T) {
 	if !(AllTime()).dayAligned() {
 		t.Fatal("all-time window is day aligned")
