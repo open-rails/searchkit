@@ -516,6 +516,18 @@ func (h *EmbeddedHub) ReprojectStaleStates(ctx context.Context, opts signal.Stal
 	return store.ReprojectStale(ctx, h.tenant, opts)
 }
 
+// RecordImpressions logs one row per SERP/shelf render (see
+// signal.Store.RecordImpressions) so clicks can later be attributed to what was
+// shown — the label source for learned ranking. Hosts call this once per render
+// (exit-beacon style), never per item.
+func (h *EmbeddedHub) RecordImpressions(ctx context.Context, impressions []signal.Impression) error {
+	store, err := h.requireStore()
+	if err != nil {
+		return err
+	}
+	return store.RecordImpressions(ctx, h.tenant, impressions)
+}
+
 // --- Signal plane ---
 
 // RecordSignal applies the entity type's registered Scorer (if any), then
