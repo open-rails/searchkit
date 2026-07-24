@@ -235,9 +235,9 @@ func TestIntegrationRecordImpressions(t *testing.T) {
 		NormalizedQuery: "two factor",
 		Language:        "en",
 		Subject:         Subject{UserID: "u1"},
-		Shown: []ShownItem{
-			{EntityRef: EntityRef{EntityType: "gallery", EntityID: "g1"}, Position: 1},
-			{EntityRef: EntityRef{EntityType: "gallery", EntityID: "g2"}, Position: 2},
+		Shown: []EntityRef{
+			{EntityType: "gallery", EntityID: "g1"},
+			{EntityType: "gallery", EntityID: "g2"},
 		},
 		OccurredAt: at(1, 10),
 	}
@@ -280,6 +280,35 @@ WHERE tenant = ? AND query_id = ?`, testDB), tenant, "q-123")
 	}
 	if len(positions) != 2 || positions[0] != 1 || positions[1] != 2 {
 		t.Fatalf("shown positions: %v", positions)
+	}
+
+	// A paginated render derives absolute positions from StartPosition.
+	if err := st.RecordImpressions(ctx, tenant, []Impression{{
+		QueryID:       "q-page2",
+		Surface:       SurfaceSearch,
+		Subject:       Subject{UserID: "u1"},
+		StartPosition: 11,
+		Shown:         []EntityRef{{EntityType: "gallery", EntityID: "g11"}, {EntityType: "gallery", EntityID: "g12"}},
+		OccurredAt:    at(1, 11),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	pageRows, err := conn.Query(ctx, fmt.Sprintf(
+		`SELECT any(shown_positions) FROM %s.search_impressions FINAL WHERE tenant = ? AND query_id = ?`, testDB),
+		tenant, "q-page2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pageRows.Close()
+	if !pageRows.Next() {
+		t.Fatal("no paginated impression row")
+	}
+	var pagePositions []uint32
+	if err := pageRows.Scan(&pagePositions); err != nil {
+		t.Fatal(err)
+	}
+	if len(pagePositions) != 2 || pagePositions[0] != 11 || pagePositions[1] != 12 {
+		t.Fatalf("StartPosition not applied: %v", pagePositions)
 	}
 }
 

@@ -203,13 +203,17 @@ func (st *Store) RecordImpressions(ctx context.Context, tenant string, impressio
 		if occurredAt.IsZero() {
 			occurredAt = now
 		}
+		start := im.StartPosition
+		if start == 0 {
+			start = 1
+		}
 		types := make([]string, len(im.Shown))
 		ids := make([]string, len(im.Shown))
 		positions := make([]uint32, len(im.Shown))
-		for j, item := range im.Shown {
-			types[j] = item.EntityType
-			ids[j] = item.EntityID
-			positions[j] = item.Position
+		for j, ref := range im.Shown {
+			types[j] = ref.EntityType
+			ids[j] = ref.EntityID
+			positions[j] = start + uint32(j)
 		}
 		rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,

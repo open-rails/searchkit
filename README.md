@@ -99,9 +99,9 @@ clicks then carry that render's `query_id` + position via `WithAttribution`:
 qid := newQueryID() // unique per render
 _ = hub.RecordImpressions(ctx, []signal.Impression{{
   QueryID: qid, Surface: signal.SurfaceSearch, NormalizedQuery: "two factor", Language: "en", Subject: user,
-  Shown: []signal.ShownItem{
-    {EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g1"}, Position: 1},
-    {EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g2"}, Position: 2},
+  Shown: []signal.EntityRef{ // in rank order; positions derived as StartPosition + index (default 1)
+    {EntityType: "gallery", EntityID: "g1"},
+    {EntityType: "gallery", EntityID: "g2"},
   },
 }})
 
@@ -112,8 +112,8 @@ _ = hub.RecordSignal(ctx, signal.Signal{
 ```
 
 `NormalizedQuery` must be normalized text only (no raw referrers/PII). `WithAttribution` writes the
-standardized `query_id`/`surface`/`position` payload keys training jobs join on. `RecordImpressions` is an
-embedded-only method on the concrete `*EmbeddedHub` (not yet on the `Hub` interface).
+standardized `query_id`/`surface`/`position` payload keys training jobs join on. Paginated renders set
+`StartPosition` to the page's first absolute position.
 
 ### Discovery reads (all id-returning)
 
@@ -144,7 +144,7 @@ recs, _  := hub.Recommend(ctx, user, searchkit.RecommendOptions{EntityTypes: []s
 - `hub.SimilarTo(..., HubSimilarOptions{CoEngagement: true})` fuses vector neighbours with
   "subjects who engaged with X also engaged with Y".
 
-**Maintenance (embedded, host-scheduled).** Two concrete `*EmbeddedHub` methods run periodically
+**Maintenance (host-scheduled).** Two `Hub` maintenance methods run periodically
 (cron-style): `hub.RefreshCoEngagement(...)` rebuilds the `item_pairs` rollup, and
 `hub.ReprojectStaleStates(ctx, signal.StaleStateOptions{})` re-derives any current-state row that fell
 behind the event stream after a crashed reprojection — idempotent, and a no-op when everything is current.
