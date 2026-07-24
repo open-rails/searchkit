@@ -40,6 +40,9 @@ type Exec interface {
 //     popularity/trending over fixed windows and arbitrary date slices; tiny
 //     (one row/entity/day), retained long-term.
 //   - mv_entity_daily — materialized view from signal_events into entity_daily.
+//   - search_impressions — one row per SERP/shelf render (the shown entity refs
+//     and their positions); clicks link back to it via a query_id carried on the
+//     click signal's attribution payload. Feeds learned-ranking training data.
 func EnsureSchema(ctx context.Context, conn Exec, opts SchemaOptions) error {
 	db := strings.TrimSpace(opts.Database)
 	if db == "" {
@@ -153,6 +156,27 @@ SETTINGS index_granularity = 8192`, db, onCluster, engine("AggregatingMergeTree"
 ) ENGINE = %s
 ORDER BY (tenant, entity_type_a, entity_id_a, entity_type_b, entity_id_b)
 SETTINGS index_granularity = 8192`, db, onCluster, engine("ReplacingMergeTree", "refreshed_at")),
+
+		// One row per SERP/shelf render. The shown items are stored as parallel
+		// arrays (entity ref + its position), never one row per item. query_id is
+		// unique per render and is what click signals carry to link back.
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.search_impressions%s (
+    tenant LowCardinality(String),
+    query_id String,
+    surface LowCardinality(String) DEFAULT 'search',
+    normalized_query String DEFAULT '',
+    language LowCardinality(String) DEFAULT '',
+    subject_kind LowCardinality(String) DEFAULT '',
+    subject String DEFAULT '',
+    shown_entity_types Array(LowCardinality(String)),
+    shown_entity_ids Array(String),
+    shown_positions Array(UInt32),
+    occurred_at DateTime('UTC'),
+    recorded_at DateTime('UTC') DEFAULT now()
+) ENGINE = %s
+PARTITION BY toYYYYMM(occurred_at)
+ORDER BY (tenant, occurred_at, query_id)
+SETTINGS index_granularity = 8192`, db, onCluster, engine("ReplacingMergeTree", "recorded_at")),
 
 		fmt.Sprintf(`CREATE MATERIALIZED VIEW IF NOT EXISTS %s.mv_entity_daily%s TO %s.entity_daily AS
 SELECT
