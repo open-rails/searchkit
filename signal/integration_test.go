@@ -224,6 +224,65 @@ func TestIntegrationReprojectStaleHealsState(t *testing.T) {
 	}
 }
 
+func TestIntegrationRecordImpressions(t *testing.T) {
+	st, conn := freshStore(t)
+	ctx := context.Background()
+	tenant := "doujins"
+
+	imp := Impression{
+		QueryID:         "q-123",
+		Surface:         SurfaceSearch,
+		NormalizedQuery: "two factor",
+		Language:        "en",
+		Subject:         Subject{UserID: "u1"},
+		Shown: []ShownItem{
+			{EntityRef: EntityRef{EntityType: "gallery", EntityID: "g1"}, Position: 1},
+			{EntityRef: EntityRef{EntityType: "gallery", EntityID: "g2"}, Position: 2},
+		},
+		OccurredAt: at(1, 10),
+	}
+	if err := st.RecordImpressions(ctx, tenant, []Impression{imp}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-record the same query_id: idempotent (ReplacingMergeTree).
+	if err := st.RecordImpressions(ctx, tenant, []Impression{imp}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := conn.Query(ctx, fmt.Sprintf(`
+SELECT count(), any(normalized_query), any(surface), any(shown_entity_ids), any(shown_positions)
+FROM %s.search_impressions FINAL
+WHERE tenant = ? AND query_id = ?`, testDB), tenant, "q-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("no impression row returned")
+	}
+	var (
+		count     uint64
+		nq, surf  string
+		ids       []string
+		positions []uint32
+	)
+	if err := rows.Scan(&count, &nq, &surf, &ids, &positions); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("re-recording the same query_id must dedup: count=%d want 1", count)
+	}
+	if nq != "two factor" || surf != SurfaceSearch {
+		t.Fatalf("unexpected fields: nq=%q surf=%q", nq, surf)
+	}
+	if len(ids) != 2 || ids[0] != "g1" || ids[1] != "g2" {
+		t.Fatalf("shown ids: %v", ids)
+	}
+	if len(positions) != 2 || positions[0] != 1 || positions[1] != 2 {
+		t.Fatalf("shown positions: %v", positions)
+	}
+}
+
 func TestIntegrationAnonVsUserSubjects(t *testing.T) {
 	st, _ := freshStore(t)
 	ctx := context.Background()
