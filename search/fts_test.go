@@ -19,6 +19,30 @@ func TestFTSSearch_Validation(t *testing.T) {
 	}
 }
 
+func TestPrefixTSQuery(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"single term", "turning", "turning:*"},
+		{"multi word", "erika ch", "erika & ch:*"},
+		{"trailing partial word", "that qui", "that & qui:*"},
+		{"punctuation stripped", "erika ch!", "erika & ch:*"},
+		{"negation skipped", "cats -dogs", ""},
+		{"leading negation skipped", "-factor", ""},
+		{"empty", "", ""},
+		{"only punctuation", "!!! ???", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := prefixTSQuery(tt.in); got != tt.want {
+				t.Fatalf("prefixTSQuery(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeFTSScore(t *testing.T) {
 	if got := NormalizeFTSScore(0); got != 0 {
 		t.Fatalf("expected 0, got %v", got)

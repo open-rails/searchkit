@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -113,7 +114,8 @@ func FTSSearch(ctx context.Context, pool *pgxpool.Pool, query string, opts FTSOp
 
 	// Prefer websearch_to_tsquery (supports multi-word and quotes).
 	// If the query is not parseable, fall back to plainto_tsquery.
-	run := func(fn string) ([]FTSHit, error) {
+	run := func(fn, qtext string) ([]FTSHit, error) {
+		args["q"] = qtext
 		sql := fmt.Sprintf(`
 			WITH q AS (
 				SELECT %s(%s.searchkit_regconfig_for_language(@language), @q) AS tsq
@@ -148,9 +150,55 @@ func FTSSearch(ctx context.Context, pool *pgxpool.Pool, query string, opts FTSOp
 		return out, rows.Err()
 	}
 
-	out, err := run("websearch_to_tsquery")
-	if err == nil {
-		return out, nil
+	out, err := run("websearch_to_tsquery", q)
+	if err != nil {
+		out, err = run("plainto_tsquery", q)
 	}
-	return run("plainto_tsquery")
+	if err != nil {
+		return nil, err
+	}
+
+	// Prefix fallback: standard FTS matches whole word-tokens, so a partial
+	// trailing word (e.g. a title prefix like "erika ch" for "erika chan …")
+	// finds nothing. When the query yields no hits, retry with a prefix
+	// tsquery that matches the final term as a prefix. This only runs on an
+	// empty result, so it never reorders or drops existing matches.
+	if len(out) == 0 {
+		if pq := prefixTSQuery(q); pq != "" {
+			if pout, perr := run("to_tsquery", pq); perr == nil {
+				return pout, nil
+			}
+		}
+	}
+	return out, nil
+}
+
+// prefixTSQuery builds a to_tsquery expression that prefix-matches the final
+// term of a normalized FTS query, e.g. "erika ch" -> "erika & ch:*". Each term
+// is reduced to letter/number runes so the result is always valid to_tsquery
+// input regardless of punctuation. It returns "" when no usable term remains,
+// or when the query uses FTS negation (a token beginning with '-') — which must
+// not be silently converted into a positive prefix match.
+func prefixTSQuery(normalized string) string {
+	fields := strings.Fields(normalized)
+	terms := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if strings.HasPrefix(f, "-") {
+			return ""
+		}
+		var b strings.Builder
+		for _, r := range f {
+			if unicode.IsLetter(r) || unicode.IsNumber(r) {
+				b.WriteRune(r)
+			}
+		}
+		if b.Len() > 0 {
+			terms = append(terms, b.String())
+		}
+	}
+	if len(terms) == 0 {
+		return ""
+	}
+	terms[len(terms)-1] += ":*"
+	return strings.Join(terms, " & ")
 }
