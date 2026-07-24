@@ -220,6 +220,82 @@ func (im Impression) validate() error {
 	return nil
 }
 
+// Standardized click-attribution payload keys. Hosts writing click/engagement
+// signals set these exact keys (via WithAttribution) so training jobs can join
+// clicks to search_impressions on the query id and read the shown position.
+const (
+	PayloadKeyQueryID  = "query_id"
+	PayloadKeySurface  = "surface"
+	PayloadKeyPosition = "position"
+)
+
+// Attribution links a click/engagement signal to the render that produced it.
+type Attribution struct {
+	QueryID  string // the Impression.QueryID the click came from
+	Surface  string // the render surface (search|foryou|similar|popular|organic)
+	Position uint32 // 1-based position of the clicked item within that render
+}
+
+// WithAttribution returns a copy of the signal with attribution written into a
+// fresh Payload under the standardized keys (existing payload entries are
+// preserved). Zero-valued fields are omitted.
+func (s Signal) WithAttribution(a Attribution) Signal {
+	payload := make(map[string]any, len(s.Payload)+3)
+	for k, v := range s.Payload {
+		payload[k] = v
+	}
+	if strings.TrimSpace(a.QueryID) != "" {
+		payload[PayloadKeyQueryID] = a.QueryID
+	}
+	if strings.TrimSpace(a.Surface) != "" {
+		payload[PayloadKeySurface] = a.Surface
+	}
+	if a.Position != 0 {
+		payload[PayloadKeyPosition] = a.Position
+	}
+	s.Payload = payload
+	return s
+}
+
+// Attribution reads attribution back from the signal's payload, tolerant of the
+// numeric type a JSON round-trip produces. Missing keys yield zero values.
+func (s Signal) Attribution() Attribution {
+	a := Attribution{}
+	if s.Payload == nil {
+		return a
+	}
+	if v, ok := s.Payload[PayloadKeyQueryID].(string); ok {
+		a.QueryID = v
+	}
+	if v, ok := s.Payload[PayloadKeySurface].(string); ok {
+		a.Surface = v
+	}
+	a.Position = payloadUint32(s.Payload[PayloadKeyPosition])
+	return a
+}
+
+// payloadUint32 coerces the numeric types a payload value may carry (native or
+// JSON-decoded) into a uint32; negatives and non-numbers yield 0.
+func payloadUint32(v any) uint32 {
+	switch n := v.(type) {
+	case uint32:
+		return n
+	case int:
+		if n >= 0 {
+			return uint32(n)
+		}
+	case int64:
+		if n >= 0 {
+			return uint32(n)
+		}
+	case float64:
+		if n >= 0 {
+			return uint32(n)
+		}
+	}
+	return 0
+}
+
 // State is one subject's standing with one entity — the row UI annotation is
 // built from (seen?, progress bar, completed?, resume pointer).
 type State struct {
