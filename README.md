@@ -87,7 +87,33 @@ _ = hub.RecordSignal(ctx, signal.Signal{
 ```
 
 The registered `Scorer` for the entity type fills `Score`/`Progress`/`ProgressMax`/`Completed`.
-Replayed events (same content or same `EventID`) deduplicate instead of double-counting.
+Replayed events (same content or same `EventID`) deduplicate instead of double-counting. The default
+`event_id` hashes `occurred_at` at nanosecond precision, so genuinely distinct same-second interactions
+stay distinct; set an explicit `EventID` for idempotency independent of timing.
+
+**Impression + attribution logging (learned-ranking training data).** Log one row per SERP/shelf render so
+clicks can be attributed to what was shown. Call once per render (exit-beacon style, **never per item**);
+clicks then carry that render's `query_id` + position via `WithAttribution`:
+
+```go
+qid := newQueryID() // unique per render
+_ = hub.RecordImpressions(ctx, []signal.Impression{{
+  QueryID: qid, Surface: signal.SurfaceSearch, NormalizedQuery: "two factor", Language: "en", Subject: user,
+  Shown: []signal.ShownItem{
+    {EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g1"}, Position: 1},
+    {EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g2"}, Position: 2},
+  },
+}})
+
+// On click, attach the render context to the click signal:
+_ = hub.RecordSignal(ctx, signal.Signal{
+  EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g1"}, Subject: user, Type: "click",
+}.WithAttribution(signal.Attribution{QueryID: qid, Surface: signal.SurfaceSearch, Position: 1}))
+```
+
+`NormalizedQuery` must be normalized text only (no raw referrers/PII). `WithAttribution` writes the
+standardized `query_id`/`surface`/`position` payload keys training jobs join on. `RecordImpressions` is an
+embedded-only method on the concrete `*EmbeddedHub` (not yet on the `Hub` interface).
 
 ### Discovery reads (all id-returning)
 
@@ -117,6 +143,11 @@ recs, _  := hub.Recommend(ctx, user, searchkit.RecommendOptions{EntityTypes: []s
   unchanged, ranking only, per-request toggle.
 - `hub.SimilarTo(..., HubSimilarOptions{CoEngagement: true})` fuses vector neighbours with
   "subjects who engaged with X also engaged with Y".
+
+**Maintenance (embedded, host-scheduled).** Two concrete `*EmbeddedHub` methods run periodically
+(cron-style): `hub.RefreshCoEngagement(...)` rebuilds the `item_pairs` rollup, and
+`hub.ReprojectStaleStates(ctx, signal.StaleStateOptions{})` re-derives any current-state row that fell
+behind the event stream after a crashed reprojection — idempotent, and a no-op when everything is current.
 
 ## Host app integration (manual)
 
