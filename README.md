@@ -161,6 +161,17 @@ Use `embedder.NewOpenAICompatible(...)` with your provider’s OpenAI-compatible
 
 For VL, the contract is URL-only (the host app provides presigned/public URLs).
 
+**Instruction-trained query embeddings (optional).** Instruction models like Qwen3-Embedding expect queries as `Instruct: {task}\nQuery: {query}` while documents stay bare. Set a per-model task string on `runtime.Options.QueryInstructions` (model name → instruction); it is applied in `EmbedQueryText` **only** — documents are never prefixed, so no reindex is needed and `SimilarTo` (stored doc vectors) is unaffected. A missing or blank entry preserves current behavior.
+
+```go
+rt, _ := runtime.NewWithContext(ctx, runtime.Options{
+  // ...pool, schema, embedders, callbacks...
+  QueryInstructions: map[string]string{
+    "qwen3-embedding": "Given a search query on an adult gallery site, retrieve matching galleries",
+  },
+})
+```
+
 ### 3) Wire host callbacks (batch-first)
 
 > ⚠️ **Changing (new design).** Pull-callbacks (`BuildLexicalString` / `BuildSemanticDocument` /
