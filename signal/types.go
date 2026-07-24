@@ -173,6 +173,53 @@ type ScorerFunc func(ctx context.Context, s Signal) (Scored, error)
 
 func (f ScorerFunc) Score(ctx context.Context, s Signal) (Scored, error) { return f(ctx, s) }
 
+// Impression surfaces — the render context a result was shown in. Hosts may use
+// other values; these are the common ones learned-ranking training distinguishes.
+const (
+	SurfaceSearch  = "search"
+	SurfaceForYou  = "foryou"
+	SurfaceSimilar = "similar"
+	SurfacePopular = "popular"
+	SurfaceOrganic = "organic"
+)
+
+// ShownItem is one entity shown in a render, at its (1-based) position.
+type ShownItem struct {
+	EntityRef
+	Position uint32
+}
+
+// Impression is one SERP/shelf render: the ordered items shown to a subject for
+// a query, recorded as a single row (never one row per item). QueryID is unique
+// per render; click signals carry it (see the attribution payload keys) so a
+// click joins back to what was shown and at which position — the label source
+// for learned ranking. NormalizedQuery must be normalized text only — no raw
+// referrers or PII. Subject is optional (anonymous renders may omit it).
+type Impression struct {
+	QueryID         string
+	Surface         string
+	NormalizedQuery string
+	Language        string
+	Subject         Subject
+	Shown           []ShownItem
+	OccurredAt      time.Time
+}
+
+func (im Impression) validate() error {
+	if strings.TrimSpace(im.QueryID) == "" {
+		return fmt.Errorf("impression: QueryID is required")
+	}
+	if len(im.Shown) == 0 {
+		return fmt.Errorf("impression: at least one shown item is required")
+	}
+	for i, item := range im.Shown {
+		if err := item.EntityRef.validate(); err != nil {
+			return fmt.Errorf("impression: shown item %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // State is one subject's standing with one entity — the row UI annotation is
 // built from (seen?, progress bar, completed?, resume pointer).
 type State struct {

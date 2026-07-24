@@ -176,6 +176,58 @@ GROUP BY tenant, subject_kind, subject, entity_type, entity_id`, st.db, st.db, s
 	return nil
 }
 
+// RecordImpressions appends one row per SERP/shelf render — the shown items
+// stored as parallel arrays, batched into a single INSERT. Idempotent per
+// QueryID (re-delivering a render replaces it via ReplacingMergeTree). Empty
+// input is a no-op.
+func (st *Store) RecordImpressions(ctx context.Context, tenant string, impressions []Impression) error {
+	if strings.TrimSpace(tenant) == "" {
+		return fmt.Errorf("signal: tenant is required")
+	}
+	if len(impressions) == 0 {
+		return nil
+	}
+	now := time.Now().UTC()
+	rows := make([]string, 0, len(impressions))
+	args := make([]any, 0, len(impressions)*11)
+	for i := range impressions {
+		im := impressions[i]
+		if err := im.validate(); err != nil {
+			return err
+		}
+		surface := strings.TrimSpace(im.Surface)
+		if surface == "" {
+			surface = SurfaceSearch
+		}
+		occurredAt := im.OccurredAt
+		if occurredAt.IsZero() {
+			occurredAt = now
+		}
+		types := make([]string, len(im.Shown))
+		ids := make([]string, len(im.Shown))
+		positions := make([]uint32, len(im.Shown))
+		for j, item := range im.Shown {
+			types[j] = item.EntityType
+			ids[j] = item.EntityID
+			positions[j] = item.Position
+		}
+		rows = append(rows, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			tenant, im.QueryID, surface, im.NormalizedQuery, im.Language,
+			im.Subject.Kind(), im.Subject.Key(),
+			types, ids, positions, occurredAt.UTC(),
+		)
+	}
+	insert := fmt.Sprintf(`INSERT INTO %s.search_impressions
+(tenant, query_id, surface, normalized_query, language, subject_kind, subject,
+ shown_entity_types, shown_entity_ids, shown_positions, occurred_at)
+VALUES %s`, st.db, strings.Join(rows, ", "))
+	if err := st.conn.Exec(ctx, insert, args...); err != nil {
+		return fmt.Errorf("signal: insert impressions: %w", err)
+	}
+	return nil
+}
+
 // reprojectState recomputes the current-state row for one (subject, entity)
 // key by aggregating its events. Deterministic and replay-idempotent:
 // total_events deduplicates by event_id, the rest are min/max/argMax.
