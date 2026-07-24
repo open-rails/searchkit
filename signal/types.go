@@ -183,25 +183,23 @@ const (
 	SurfaceOrganic = "organic"
 )
 
-// ShownItem is one entity shown in a render, at its (1-based) position.
-type ShownItem struct {
-	EntityRef
-	Position uint32
-}
-
-// Impression is one SERP/shelf render: the ordered items shown to a subject for
-// a query, recorded as a single row (never one row per item). QueryID is unique
-// per render; click signals carry it (see the attribution payload keys) so a
-// click joins back to what was shown and at which position — the label source
-// for learned ranking. NormalizedQuery must be normalized text only — no raw
-// referrers or PII. Subject is optional (anonymous renders may omit it).
+// Impression is one SERP/shelf render: the ranked entities shown to a subject
+// for a query, recorded as a single row (never one row per item). Shown is in
+// rank order and positions are derived as StartPosition + index — StartPosition
+// defaults to 1 (a first page is positions 1..N; a paginated render sets it to
+// the page's first absolute position). QueryID is unique per render; click
+// signals carry it (see the attribution payload keys) so a click joins back to
+// what was shown and at which position — the label source for learned ranking.
+// NormalizedQuery must be normalized text only — no raw referrers or PII.
+// Subject is optional (anonymous renders may omit it).
 type Impression struct {
 	QueryID         string
 	Surface         string
 	NormalizedQuery string
 	Language        string
 	Subject         Subject
-	Shown           []ShownItem
+	Shown           []EntityRef
+	StartPosition   uint32
 	OccurredAt      time.Time
 }
 
@@ -210,11 +208,11 @@ func (im Impression) validate() error {
 		return fmt.Errorf("impression: QueryID is required")
 	}
 	if len(im.Shown) == 0 {
-		return fmt.Errorf("impression: at least one shown item is required")
+		return fmt.Errorf("impression: at least one shown entity is required")
 	}
-	for i, item := range im.Shown {
-		if err := item.EntityRef.validate(); err != nil {
-			return fmt.Errorf("impression: shown item %d: %w", i, err)
+	for i, ref := range im.Shown {
+		if err := ref.validate(); err != nil {
+			return fmt.Errorf("impression: shown entity %d: %w", i, err)
 		}
 	}
 	return nil

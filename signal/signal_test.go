@@ -104,19 +104,19 @@ func TestAttributionRoundTrip(t *testing.T) {
 }
 
 func TestImpressionValidate(t *testing.T) {
-	item := ShownItem{EntityRef: EntityRef{EntityType: "gallery", EntityID: "1"}, Position: 1}
-	if err := (Impression{QueryID: "q", Shown: []ShownItem{item}}).validate(); err != nil {
+	ref := EntityRef{EntityType: "gallery", EntityID: "1"}
+	if err := (Impression{QueryID: "q", Shown: []EntityRef{ref}}).validate(); err != nil {
 		t.Fatalf("valid impression rejected: %v", err)
 	}
-	if err := (Impression{Shown: []ShownItem{item}}).validate(); err == nil {
+	if err := (Impression{Shown: []EntityRef{ref}}).validate(); err == nil {
 		t.Fatal("missing QueryID must error")
 	}
 	if err := (Impression{QueryID: "q"}).validate(); err == nil {
 		t.Fatal("empty Shown must error")
 	}
-	bad := ShownItem{EntityRef: EntityRef{EntityType: "gallery"}}
-	if err := (Impression{QueryID: "q", Shown: []ShownItem{bad}}).validate(); err == nil {
-		t.Fatal("shown item missing entity id must error")
+	bad := EntityRef{EntityType: "gallery"}
+	if err := (Impression{QueryID: "q", Shown: []EntityRef{bad}}).validate(); err == nil {
+		t.Fatal("shown entity missing entity id must error")
 	}
 }
 
