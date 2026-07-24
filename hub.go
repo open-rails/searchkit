@@ -54,6 +54,7 @@ type Hub interface {
 	// Signal plane.
 	RecordSignal(ctx context.Context, s signal.Signal) error
 	RecordSignals(ctx context.Context, signals []signal.Signal) error
+	RecordImpressions(ctx context.Context, impressions []signal.Impression) error
 	Forget(ctx context.Context, subject signal.Subject, entityType, entityID string) error
 
 	// Discovery plane.
@@ -70,6 +71,7 @@ type Hub interface {
 
 	// Maintenance.
 	RefreshCoEngagement(ctx context.Context, opts signal.RefreshCoEngagementOptions) error
+	ReprojectStaleStates(ctx context.Context, opts signal.StaleStateOptions) (int, error)
 }
 
 // EmbeddedHub implements the full Hub surface; a future remote client must
@@ -506,7 +508,7 @@ func (h *EmbeddedHub) RefreshCoEngagement(ctx context.Context, opts signal.Refre
 
 // ReprojectStaleStates repairs durable current-state that has fallen behind the
 // event stream (see signal.Store.ReprojectStale for the failure it heals).
-// Embedded-only maintenance, intended to run periodically like
+// Host-scheduled maintenance, intended to run periodically like
 // RefreshCoEngagement; returns the number of (subject, entity) keys healed.
 func (h *EmbeddedHub) ReprojectStaleStates(ctx context.Context, opts signal.StaleStateOptions) (int, error) {
 	store, err := h.requireStore()
