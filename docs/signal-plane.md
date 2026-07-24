@@ -63,6 +63,11 @@ On ClickHouse this is a `ReplacingMergeTree(last_updated)` ordered by
 `(tenant, subject, entity_type, entity_id)` so the latest state wins; no TTL (durable seen-state,
 unlike a 30-day visitor counter).
 
+The projection is recomputed from the (deduplicated) event stream on every signal, so it is
+replay-idempotent and self-heals on the next signal for a key. A crashed reprojection can leave a key
+behind until then; a periodic host-scheduled `ReprojectStale` sweep (`*EmbeddedHub.ReprojectStaleStates`)
+finds rows that lag the stream and re-derives them.
+
 ## The Scorer (per-entity extension point)
 
 ```go
@@ -83,6 +88,22 @@ Examples:
   `completed = watched ≥ 0.9 * duration`; score from watch %.
 
 The kit owns the storage/upsert/read machinery; the host owns only the `Scorer`.
+
+## Impressions & attribution (learned-ranking data)
+
+Beyond the engagement stream, a separate append-only table records **what was shown**, so clicks become
+training labels for learned ranking:
+
+- **`search_impressions`** — one row per SERP/shelf render (never per item). `tenant`, `query_id` (unique
+  per render), `surface` (`search`/`foryou`/`similar`/`popular`/`organic`), `normalized_query` (normalized
+  text only — no raw referrers/PII), `language`, `subject`, the shown items as parallel arrays
+  `shown_entity_types` / `shown_entity_ids` / `shown_positions`, and `occurred_at`.
+  `ReplacingMergeTree(recorded_at)`, month-partitioned; re-delivering a `query_id` deduplicates.
+
+Write via `RecordImpressions` (batched, one row per render). A **click** is an ordinary signal that links
+back to its render through standardized attribution payload keys — `query_id`, `surface`, `position` — set
+via `Signal.WithAttribution(...)`. Training joins clicks to `search_impressions` on `query_id` and reads
+the shown position, yielding `(query, shown items + positions, clicked item, dwell)`.
 
 ## Facets & filtering (host-defined)
 

@@ -87,7 +87,33 @@ _ = hub.RecordSignal(ctx, signal.Signal{
 ```
 
 The registered `Scorer` for the entity type fills `Score`/`Progress`/`ProgressMax`/`Completed`.
-Replayed events (same content or same `EventID`) deduplicate instead of double-counting.
+Replayed events (same content or same `EventID`) deduplicate instead of double-counting. The default
+`event_id` hashes `occurred_at` at nanosecond precision, so genuinely distinct same-second interactions
+stay distinct; set an explicit `EventID` for idempotency independent of timing.
+
+**Impression + attribution logging (learned-ranking training data).** Log one row per SERP/shelf render so
+clicks can be attributed to what was shown. Call once per render (exit-beacon style, **never per item**);
+clicks then carry that render's `query_id` + position via `WithAttribution`:
+
+```go
+qid := newQueryID() // unique per render
+_ = hub.RecordImpressions(ctx, []signal.Impression{{
+  QueryID: qid, Surface: signal.SurfaceSearch, NormalizedQuery: "two factor", Language: "en", Subject: user,
+  Shown: []signal.ShownItem{
+    {EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g1"}, Position: 1},
+    {EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g2"}, Position: 2},
+  },
+}})
+
+// On click, attach the render context to the click signal:
+_ = hub.RecordSignal(ctx, signal.Signal{
+  EntityRef: signal.EntityRef{EntityType: "gallery", EntityID: "g1"}, Subject: user, Type: "click",
+}.WithAttribution(signal.Attribution{QueryID: qid, Surface: signal.SurfaceSearch, Position: 1}))
+```
+
+`NormalizedQuery` must be normalized text only (no raw referrers/PII). `WithAttribution` writes the
+standardized `query_id`/`surface`/`position` payload keys training jobs join on. `RecordImpressions` is an
+embedded-only method on the concrete `*EmbeddedHub` (not yet on the `Hub` interface).
 
 ### Discovery reads (all id-returning)
 
@@ -117,6 +143,11 @@ recs, _  := hub.Recommend(ctx, user, searchkit.RecommendOptions{EntityTypes: []s
   unchanged, ranking only, per-request toggle.
 - `hub.SimilarTo(..., HubSimilarOptions{CoEngagement: true})` fuses vector neighbours with
   "subjects who engaged with X also engaged with Y".
+
+**Maintenance (embedded, host-scheduled).** Two concrete `*EmbeddedHub` methods run periodically
+(cron-style): `hub.RefreshCoEngagement(...)` rebuilds the `item_pairs` rollup, and
+`hub.ReprojectStaleStates(ctx, signal.StaleStateOptions{})` re-derives any current-state row that fell
+behind the event stream after a crashed reprojection — idempotent, and a no-op when everything is current.
 
 ## Host app integration (manual)
 
@@ -160,6 +191,17 @@ func applySearchkitMigrations(ctx context.Context, sqlDB *sql.DB, schema string)
 Use `embedder.NewOpenAICompatible(...)` with your provider’s OpenAI-compatible base URL + API key + model name.
 
 For VL, the contract is URL-only (the host app provides presigned/public URLs).
+
+**Instruction-trained query embeddings (optional).** Instruction models like Qwen3-Embedding expect queries as `Instruct: {task}\nQuery: {query}` while documents stay bare. Set a per-model task string on `runtime.Options.QueryInstructions` (model name → instruction); it is applied in `EmbedQueryText` **only** — documents are never prefixed, so no reindex is needed and `SimilarTo` (stored doc vectors) is unaffected. A missing or blank entry preserves current behavior.
+
+```go
+rt, _ := runtime.NewWithContext(ctx, runtime.Options{
+  // ...pool, schema, embedders, callbacks...
+  QueryInstructions: map[string]string{
+    "qwen3-embedding": "Given a search query on an adult gallery site, retrieve matching galleries",
+  },
+})
+```
 
 ### 3) Wire host callbacks (batch-first)
 
@@ -324,6 +366,28 @@ report, err := eval.BuildReport(eval.ReportIdentity{
   CandidateID: "searchkit-and-config-sha256",
 }, []eval.Outcome{outcome}, "suite")
 ```
+
+**Running a suite against a live client.** `eval` is dependency-free; wire your client behind `eval.CaseRunner` and let `eval.RunSuite` execute every case and build one report. `searchkit.NewEvalRunner` adapts a `*searchkit.Client` (each case's query → `client.Search` → results):
+
+```go
+runner := searchkit.NewEvalRunner(client, searchkit.SearchOptions{
+  Mode: searchkit.SearchModeDual, Language: "en", SemanticMinSimilarity: 0.5,
+})
+report, err := eval.RunSuite(ctx, suite, runner, eval.ReportIdentity{
+  DatasetID: "corpus-sha", SuiteID: suite.ID, CandidateID: "dual+floor0.5",
+}, "query_type") // optional group-by labels → per-label breakdowns
+```
+
+**Regression gate.** Commit a baseline report as a golden file, then fail CI when quality drops beyond tolerance:
+
+```go
+comparison, err := eval.Compare(baseline, report, eval.Tolerances{
+  RecallAtKDrop: 0, SuccessAtKDrop: 0, NDCGAtKDrop: 0.05, ExactEmptyRateDrop: 0,
+})
+if comparison.Regressed() { /* fail the test */ }
+```
+
+**Config diffing.** Run the suite under two `SearchOptions` (e.g. floor on vs off) with different `CandidateID`s and `Compare` the reports to pick a setting from measured nDCG/recall rather than by feel; `eval.CandidateFloors` + `eval.SweepResultFloors` sweep a semantic-score floor per score domain.
 
 Quality metrics exclude execution failures from their denominators, while `FailedCases` remains explicit. `QualityStatus` distinguishes hits, misses, exact emptiness, unexpected results, and unjudged cases. Pass only stable lowercase identifier categories such as `timeout` or `semantic_search` to `eval.Failed`; unsafe categories normalize to `unspecified`. Reports include a deterministic content identity covering report identity, outcomes, ordered results, and scores. Baseline comparison validates that identity, report aggregates, and exact case definitions before comparing metrics. Floor sweeps require every outcome, including failures, to carry one matching `score_domain` label and accept `context.Context` for cancellation.
 
