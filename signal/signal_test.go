@@ -72,6 +72,54 @@ func TestEventIDDistinguishesSubSecond(t *testing.T) {
 	}
 }
 
+func TestAttributionRoundTrip(t *testing.T) {
+	base := Signal{
+		EntityRef: EntityRef{EntityType: "gallery", EntityID: "1"},
+		Subject:   Subject{UserID: "u1"},
+		Type:      "click",
+		Payload:   map[string]any{"existing": "keep"},
+	}
+	got := base.WithAttribution(Attribution{QueryID: "q1", Surface: SurfaceSearch, Position: 3})
+
+	if _, ok := base.Payload[PayloadKeyQueryID]; ok {
+		t.Fatal("WithAttribution must not mutate the original signal's payload")
+	}
+	if got.Payload["existing"] != "keep" {
+		t.Fatal("existing payload entries must be preserved")
+	}
+	if a := got.Attribution(); a.QueryID != "q1" || a.Surface != SurfaceSearch || a.Position != 3 {
+		t.Fatalf("attribution round-trip mismatch: %+v", a)
+	}
+
+	// Tolerant of the float64 a JSON round-trip produces.
+	viaJSON := Signal{Payload: map[string]any{PayloadKeyQueryID: "q2", PayloadKeyPosition: float64(5)}}
+	if a := viaJSON.Attribution(); a.Position != 5 || a.QueryID != "q2" {
+		t.Fatalf("attribution must tolerate float64 position: %+v", a)
+	}
+
+	// Zero-valued attribution adds no keys.
+	if empty := (Signal{}).WithAttribution(Attribution{}); len(empty.Payload) != 0 {
+		t.Fatalf("zero attribution must add no keys, got %v", empty.Payload)
+	}
+}
+
+func TestImpressionValidate(t *testing.T) {
+	item := ShownItem{EntityRef: EntityRef{EntityType: "gallery", EntityID: "1"}, Position: 1}
+	if err := (Impression{QueryID: "q", Shown: []ShownItem{item}}).validate(); err != nil {
+		t.Fatalf("valid impression rejected: %v", err)
+	}
+	if err := (Impression{Shown: []ShownItem{item}}).validate(); err == nil {
+		t.Fatal("missing QueryID must error")
+	}
+	if err := (Impression{QueryID: "q"}).validate(); err == nil {
+		t.Fatal("empty Shown must error")
+	}
+	bad := ShownItem{EntityRef: EntityRef{EntityType: "gallery"}}
+	if err := (Impression{QueryID: "q", Shown: []ShownItem{bad}}).validate(); err == nil {
+		t.Fatal("shown item missing entity id must error")
+	}
+}
+
 func TestWindowDayAligned(t *testing.T) {
 	if !(AllTime()).dayAligned() {
 		t.Fatal("all-time window is day aligned")
@@ -298,8 +346,8 @@ func TestEnsureSchemaValidation(t *testing.T) {
 	if err := EnsureSchema(ctx, fc, SchemaOptions{Database: "hub"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(fc.execs) != 7 { // db + 3 tables + net_value alter + item_pairs + mv
-		t.Fatalf("expected 7 DDL statements, got %d", len(fc.execs))
+	if len(fc.execs) != 8 { // db + 3 tables + net_value alter + item_pairs + search_impressions + mv
+		t.Fatalf("expected 8 DDL statements, got %d", len(fc.execs))
 	}
 	for _, e := range fc.execs {
 		if strings.Contains(e.query, "ON CLUSTER") || strings.Contains(e.query, "Replicated") {
