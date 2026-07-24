@@ -160,6 +160,12 @@ func TestFTSSearch_RawDocumentCorpusPersisted_Integration(t *testing.T) {
 			wantEntity: "3",
 			reason:     "raw 'Café del Mar (Vol. 2)' has punctuation around tokens; 'Mar' must survive as a lowercased tsv token so 'mar' matches",
 		},
+		{
+			name:       "partial_trailing_word_matches_via_prefix",
+			query:      "authen",
+			wantEntity: "1",
+			reason:     "raw 'Two-Factor Authentication!'; 'authen' is not a full lexeme, so standard FTS misses it — the trailing-term prefix fallback (authen:*) must recover the hit",
+		},
 	}
 
 	for _, tt := range tests {
