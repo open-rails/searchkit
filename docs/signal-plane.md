@@ -65,8 +65,8 @@ unlike a 30-day visitor counter).
 
 The projection is recomputed from the (deduplicated) event stream on every signal, so it is
 replay-idempotent and self-heals on the next signal for a key. A crashed reprojection can leave a key
-behind until then; a periodic host-scheduled `ReprojectStale` sweep (`*EmbeddedHub.ReprojectStaleStates`)
-finds rows that lag the stream and re-derives them.
+behind until then; a periodic host-scheduled sweep (`Hub.ReprojectStaleStates`) finds rows that lag the
+stream and re-derives them.
 
 ## The Scorer (per-entity extension point)
 
@@ -100,7 +100,8 @@ training labels for learned ranking:
   `shown_entity_types` / `shown_entity_ids` / `shown_positions`, and `occurred_at`.
   `ReplacingMergeTree(recorded_at)`, month-partitioned; re-delivering a `query_id` deduplicates.
 
-Write via `RecordImpressions` (batched, one row per render). A **click** is an ordinary signal that links
+Write via `RecordImpressions` (batched, one row per render; shown entities are given in rank order and
+positions are derived from `StartPosition`). A **click** is an ordinary signal that links
 back to its render through standardized attribution payload keys — `query_id`, `surface`, `position` — set
 via `Signal.WithAttribution(...)`. Training joins clicks to `search_impressions` on `query_id` and reads
 the shown position, yielding `(query, shown items + positions, clicked item, dwell)`.
