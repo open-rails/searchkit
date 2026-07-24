@@ -325,6 +325,28 @@ report, err := eval.BuildReport(eval.ReportIdentity{
 }, []eval.Outcome{outcome}, "suite")
 ```
 
+**Running a suite against a live client.** `eval` is dependency-free; wire your client behind `eval.CaseRunner` and let `eval.RunSuite` execute every case and build one report. `searchkit.NewEvalRunner` adapts a `*searchkit.Client` (each case's query → `client.Search` → results):
+
+```go
+runner := searchkit.NewEvalRunner(client, searchkit.SearchOptions{
+  Mode: searchkit.SearchModeDual, Language: "en", SemanticMinSimilarity: 0.5,
+})
+report, err := eval.RunSuite(ctx, suite, runner, eval.ReportIdentity{
+  DatasetID: "corpus-sha", SuiteID: suite.ID, CandidateID: "dual+floor0.5",
+}, "query_type") // optional group-by labels → per-label breakdowns
+```
+
+**Regression gate.** Commit a baseline report as a golden file, then fail CI when quality drops beyond tolerance:
+
+```go
+comparison, err := eval.Compare(baseline, report, eval.Tolerances{
+  RecallAtKDrop: 0, SuccessAtKDrop: 0, NDCGAtKDrop: 0.05, ExactEmptyRateDrop: 0,
+})
+if comparison.Regressed() { /* fail the test */ }
+```
+
+**Config diffing.** Run the suite under two `SearchOptions` (e.g. floor on vs off) with different `CandidateID`s and `Compare` the reports to pick a setting from measured nDCG/recall rather than by feel; `eval.CandidateFloors` + `eval.SweepResultFloors` sweep a semantic-score floor per score domain.
+
 Quality metrics exclude execution failures from their denominators, while `FailedCases` remains explicit. `QualityStatus` distinguishes hits, misses, exact emptiness, unexpected results, and unjudged cases. Pass only stable lowercase identifier categories such as `timeout` or `semantic_search` to `eval.Failed`; unsafe categories normalize to `unspecified`. Reports include a deterministic content identity covering report identity, outcomes, ordered results, and scores. Baseline comparison validates that identity, report aggregates, and exact case definitions before comparing metrics. Floor sweeps require every outcome, including failures, to carry one matching `score_domain` label and accept `context.Context` for cancellation.
 
 Before releasing changes to search retrieval or evaluation, run the PostgreSQL integration gate in addition to normal tests. Point it at a disposable test database: the test creates extensions and an isolated uniquely named schema, then removes that schema.
