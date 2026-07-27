@@ -11,7 +11,19 @@ import (
 type LinkedEntity struct {
 	EntityType string
 	EntityID   string
-	Score      float32
+	// Score is the fused (RRF) ranking score. It orders links but is NOT
+	// comparable across queries — use the provenance fields below to judge
+	// link confidence.
+	Score float32
+	// Lexical reports whether a lexical branch (fts/trigram/pgroonga) produced
+	// this link. Lexical links are exact/alias/name matches and are trustworthy
+	// by construction; semantic-only links are similarity guesses.
+	Lexical bool
+	// SemanticSimilarity is the raw cosine from the semantic branch, 0 when the
+	// link did not surface semantically. Unlike Score it is comparable across
+	// queries, so hosts can threshold on it (e.g. suppress weak
+	// semantic-only links).
+	SemanticSimilarity float32
 }
 
 // QueryPlan is the structured interpretation of a raw query: the controlled-
@@ -72,7 +84,7 @@ func (c *Client) LinkQuery(ctx context.Context, query string, opts LinkOptions) 
 	if mode == "" {
 		mode = SearchModeDual
 	}
-	hits, err := c.Search(ctx, query, SearchOptions{
+	hits, trace, err := c.SearchWithTrace(ctx, query, SearchOptions{
 		Language:                     opts.Language,
 		Mode:                         mode,
 		EntityTypes:                  vocab,
@@ -86,21 +98,58 @@ func (c *Client) LinkQuery(ctx context.Context, query string, opts LinkOptions) 
 	if err != nil {
 		return QueryPlan{}, fmt.Errorf("link query: %w", err)
 	}
-	return planFromHits(query, hits, limit), nil
+	return planFromHits(query, hits, limit, trace), nil
 }
 
-// planFromHits maps ranked vocabulary hits into a QueryPlan. Pure so it is unit
-// testable without a database.
-func planFromHits(query string, hits []SearchHit, limit int) QueryPlan {
+// linkProvenance is the per-entity branch evidence extracted from a trace.
+type linkProvenance struct {
+	lexical            bool
+	semanticSimilarity float32
+}
+
+// provenanceFromTrace folds the trace's per-source candidates into per-entity
+// provenance: whether any lexical backend surfaced the entity, and the highest
+// raw cosine the semantic backend reported for it.
+func provenanceFromTrace(trace SearchTrace) map[string]linkProvenance {
+	prov := make(map[string]linkProvenance)
+	for _, src := range trace.Sources {
+		if src.Status != SourceStatusSucceeded {
+			continue
+		}
+		semantic := src.Backend == BackendSemantic
+		for _, cand := range src.Candidates {
+			key := cand.Key.EntityType + "\x00" + cand.Key.EntityID
+			p := prov[key]
+			if semantic {
+				if cand.Score > p.semanticSimilarity {
+					p.semanticSimilarity = cand.Score
+				}
+			} else {
+				p.lexical = true
+			}
+			prov[key] = p
+		}
+	}
+	return prov
+}
+
+// planFromHits maps ranked vocabulary hits into a QueryPlan, annotating each
+// link with branch provenance from the trace. Pure so it is unit testable
+// without a database.
+func planFromHits(query string, hits []SearchHit, limit int, trace SearchTrace) QueryPlan {
 	plan := QueryPlan{Query: query, Residual: query}
+	prov := provenanceFromTrace(trace)
 	for _, h := range hits {
 		if limit > 0 && len(plan.LinkedEntities) >= limit {
 			break
 		}
+		p := prov[h.EntityType+"\x00"+h.EntityID]
 		plan.LinkedEntities = append(plan.LinkedEntities, LinkedEntity{
-			EntityType: h.EntityType,
-			EntityID:   h.EntityID,
-			Score:      h.Score,
+			EntityType:         h.EntityType,
+			EntityID:           h.EntityID,
+			Score:              h.Score,
+			Lexical:            p.lexical,
+			SemanticSimilarity: p.semanticSimilarity,
 		})
 	}
 	return plan
