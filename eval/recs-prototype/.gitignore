@@ -1,5 +1,0 @@
-# Real user-behavior data (privacy) + local artifacts — never commit.
-*.csv
-*.tsv
-.venv/
-__pycache__/

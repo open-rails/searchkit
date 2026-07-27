@@ -1,50 +1,37 @@
-"""#36 candidates on the #24 protocol: item2vec (gensim, Caselles-Dupre tuning)
-and implicit-ALS, judged on the SAME temporal split + metrics as the baselines.
-Bar to beat (covis-raw cap=20 topk=100): recall@10 0.128 / recall@20 0.157 /
-ndcg@10 0.108, tail-hit@20 ~0. Ship rule (#36): must beat overall AND on tail.
-No commits; prototyping only.
+"""Candidate models on the eval protocol: item2vec (gensim, Caselles-Dupre tuning)
+and implicit-ALS, judged on the SAME temporal split + metrics as the baselines
+(eval.py). Ship rule: a candidate must beat the tuned co-vis baseline
+overall AND on the tail, else co-vis stays the interim system.
+
+Host-agnostic input: interactions.csv (user_id,item_id,timestamp,weight) —
+see eval.py. Rows with weight>1 are treated as "strong" for the weighted-ALS
+variant; the host decides what earns that weight.
 """
-import os
-import csv, math, time, collections, sys
+import os, csv, math, time, collections, sys
 import numpy as np
 from scipy import sparse
 
-DATA = os.environ.get('RECS_DATA', os.path.dirname(os.path.abspath(__file__)))
-ALL_POS = {'viewed', 'time_spent', 'favorite', 'download', 'thumb_up',
-           'viewed_from_favorites', 'viewed_more_than_12_pages', 'share',
-           'search_and_click'}
-STRONG = {'favorite', 'download', 'thumb_up', 'viewed_from_favorites',
-          'viewed_more_than_12_pages', 'share'}
+DATA = os.environ.get('RECOMMENDER_DATA', os.path.dirname(os.path.abspath(__file__)))
 K_EVAL = (10, 20)
 HIST_FOR_USER_VEC = 20    # matches the winning baseline's recency window
 
 t0 = time.time()
 
-# ── identical data prep to the baseline runs ──
-gallery = set()
-for line in open(f'{DATA}/folders_index.tsv'):
-    p = line.rstrip('\n').split('\t')
-    if len(p) >= 4:
-        fid, main = int(p[0]), int(p[1])
-        parent = int(p[2]) if p[2] not in ('', 'NULL') else 0
-        if main == 1 and parent > 1:
-            gallery.add(fid)
-
 first = {}
-strength = collections.Counter()   # (u,i) -> has strong signal
-with open(f'{DATA}/feedback_all.csv') as f:
-    r = csv.reader(f); next(r)
+strong = set()
+with open(f'{DATA}/interactions.csv') as f:
+    r = csv.reader(f)
+    next(r)
     for row in r:
-        if len(row) < 4 or row[0] not in ALL_POS:
+        if len(row) < 3:
             continue
-        iid = row[2].replace('folder-', '')
-        if not iid.isdigit() or int(iid) not in gallery:
-            continue
-        key = (row[1], int(iid))
-        if key not in first or row[3] < first[key]:
-            first[key] = row[3]
-        if row[0] in STRONG:
-            strength[key] += 1
+        u, i, ts = row[0], row[1], row[2]
+        w = float(row[3]) if len(row) > 3 and row[3] else 1.0
+        key = (u, i)
+        if key not in first or ts < first[key]:
+            first[key] = ts
+        if w > 1.0:
+            strong.add(key)
 
 events = sorted(((ts, u, i) for (u, i), ts in first.items()))
 cut = events[int(len(events) * 0.8)][0]
@@ -105,7 +92,6 @@ def item2vec_run(ns_exponent, window, epochs=30, dims=100):
     m = Word2Vec(sentences, vector_size=dims, window=window, min_count=1, sg=1,
                  negative=10, ns_exponent=ns_exponent, sample=1e-4,
                  workers=8, epochs=epochs, seed=7)
-    # matrix aligned to catalog; missing items get zero vector
     V = np.zeros((n_items, dims), dtype=np.float32)
     hitn = 0
     for i in items:
@@ -138,9 +124,7 @@ def als_run(factors, reg, alpha, weighted):
     uix = {u: k for k, u in enumerate(train_by_user)}
     for u, h in train_by_user.items():
         for i in h:
-            w = 1.0
-            if weighted and strength.get((u, i), 0) > 0:
-                w = 3.0
+            w = 3.0 if (weighted and (u, i) in strong) else 1.0
             rows.append(uix[u]); cols.append(item_ix[i]); vals.append(w)
     UI = sparse.csr_matrix((np.array(vals, np.float32), (rows, cols)),
                            shape=(len(uix), n_items))
@@ -161,5 +145,4 @@ for factors, alpha, weighted in ((64, 40, False), (128, 40, False), (128, 40, Tr
     evaluate(f'ALS f={factors} a={alpha} w={weighted}', fn)
     sys.stdout.flush()
 
-print(f'\nBAR (covis-raw): recall@10=0.128 recall@20=0.157 ndcg@10=0.108 tail~0')
-print(f'total {time.time()-t0:.0f}s')
+print(f'\ntotal {time.time()-t0:.0f}s')
