@@ -1,0 +1,7 @@
+# Real user-behavior data + normalized inputs (privacy) — never commit.
+*.csv
+*.tsv
+.venv/
+__pycache__/
+# Host-side adapter: doujins domain knowledge, lives with the host, not in searchkit.
+adapt_*.py

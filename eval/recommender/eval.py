@@ -1,23 +1,26 @@
-"""Recs eval runner v1 (searchkit #24 protocol, offline on the gorse snapshot).
+"""Recommender eval protocol, offline reference implementation.
 
-- Global TEMPORAL split (train = first 80% of time, test = rest).
-- Full-catalog ranking per warm user, seen-train items excluded.
-- Metrics: recall@10/20, NDCG@10, per-user averaged; head/tail stratification.
-- Baselines (the bar any learned model must beat, per Dacrema RecSys'19):
-    pop        : global popularity
-    covis-raw  : item co-occurrence counts, topK neighbors
-    covis-cos  : cosine-normalized co-occurrence (popularity-damped), topK
-No commits; pure prototyping.
+Host-agnostic: consumes a normalized interaction log produced by a HOST-side
+adapter — searchkit attaches no meaning to user/item ids or to what the host
+counted as a positive signal.
+
+Input (in RECOMMENDER_DATA dir, default = this dir):
+  interactions.csv  header: user_id,item_id,timestamp,weight
+    - one row per positive interaction event; the host decides what counts as
+      positive and maps its signal strengths to `weight` (>=1.0; e.g. 1.0
+      weak, 3.0 strong). Timestamps must sort chronologically as strings
+      (ISO-8601 or zero-padded epoch, one style throughout).
+
+Protocol: global TEMPORAL split (train = first 80% of time), full-catalog
+ranking per warm user (seen-train excluded), recall@10/20 + NDCG@10,
+head/tail stratification. Baselines: popularity, item co-visitation
+(raw + cosine) — the bar any learned model must beat (Dacrema RecSys'19).
 """
-import os
-import csv, math, time, collections
+import os, csv, math, time, collections
 import numpy as np
 from scipy import sparse
 
-DATA = os.environ.get('RECS_DATA', os.path.dirname(os.path.abspath(__file__)))
-POSITIVE = {'viewed', 'time_spent', 'favorite', 'download', 'thumb_up',
-            'viewed_from_favorites', 'viewed_more_than_12_pages', 'share',
-            'search_and_click'}
+DATA = os.environ.get('RECOMMENDER_DATA', os.path.dirname(os.path.abspath(__file__)))
 TRAIN_FRACTION = 0.8
 HISTORY_CAP = 50          # per-user items used for co-vis matrix (most recent)
 TOPK_NEIGHBORS = 100      # sparsify item-item sims
@@ -25,34 +28,20 @@ K_EVAL = (10, 20)
 
 t0 = time.time()
 
-# ── galleries only (per legacy_migrate rules) ──
-gallery = set()
-for line in open(f'{DATA}/folders_index.tsv'):
-    p = line.rstrip('\n').split('\t')
-    if len(p) >= 4:
-        fid, main, parent = int(p[0]), int(p[1]), int(p[2]) if p[2] not in ('', 'NULL') else 0
-        if main == 1 and parent > 1:
-            gallery.add(fid)
-
-# ── load + normalize feedback ──
-# engagement = earliest positive event per (user, item)
-first_ts = {}
-with open(f'{DATA}/feedback_all.csv') as f:
+# load + dedupe to first occurrence per (user, item)
+first = {}
+with open(f'{DATA}/interactions.csv') as f:
     r = csv.reader(f)
     next(r)
     for row in r:
-        if len(row) < 4 or row[0] not in POSITIVE:
+        if len(row) < 3:
             continue
-        iid = row[2].replace('folder-', '')
-        if not iid.isdigit() or int(iid) not in gallery:
-            continue
-        key = (row[1], int(iid))
-        ts = row[3]
-        if key not in first_ts or ts < first_ts[key]:
-            first_ts[key] = ts
-
-events = sorted(((ts, u, i) for (u, i), ts in first_ts.items()))
-print(f'engagements (user,item deduped, galleries only): {len(events):,}  '
+        u, i, ts = row[0], row[1], row[2]
+        key = (u, i)
+        if key not in first or ts < first[key]:
+            first[key] = ts
+events = sorted(((ts, u, i) for (u, i), ts in first.items()))
+print(f'interactions (user,item deduped): {len(events):,}  '
       f'[{events[0][0]} .. {events[-1][0]}]  ({time.time()-t0:.0f}s)')
 
 cut = events[int(len(events) * TRAIN_FRACTION)][0]
@@ -67,7 +56,7 @@ test_by_user = collections.defaultdict(set)
 for u, i in test:
     test_by_user[u].add(i)
 
-# item universe = items with >=1 train engagement (rankable catalog)
+# item universe = items with >=1 train interaction (rankable catalog)
 item_pop = collections.Counter(i for _, i in train)
 items = sorted(item_pop)
 item_ix = {it: k for k, it in enumerate(items)}
@@ -105,7 +94,6 @@ def topk_sparsify(S, k):
     S = S.tolil()
     S.setdiag(0)
     S = S.tocsr()
-    out_rows = []
     for r in range(S.shape[0]):
         lo, hi = S.indptr[r], S.indptr[r + 1]
         if hi - lo > k:
