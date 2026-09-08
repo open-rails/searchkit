@@ -85,29 +85,27 @@ func LexicalSearch(ctx context.Context, pool *pgxpool.Pool, query string, opts L
 		}
 	}
 
-	// Use both `%` (fast candidate filter via gin_trgm_ops) and similarity threshold.
-	// Note: `%` is sensitive to pg_trgm similarity threshold setting; we still apply
-	// an explicit SIMILARITY(...) >= minSimilarity filter.
 	minSim := opts.MinSimilarity
 	if minSim <= 0 {
 		minSim = 0.1
 	}
 	args["min_similarity"] = minSim
 
-	// NOTE: `pg_trgm`'s `%` operator uses a session-level similarity threshold
-	// (set via `set_limit`). To ensure `MinSimilarity` is respected (and to keep
-	// the GIN trigram index usable for candidate filtering), we set the limit via
-	// a CTE and *reference it* so Postgres can't optimize it away.
+	// Documents concatenate every indexed field, so whole-string SIMILARITY between a
+	// short query and a long document is near zero and no realistic threshold matches.
+	// WORD_SIMILARITY scores the query against the best-matching extent of the document
+	// instead; `<%` is its indexable form (gin_trgm_ops) and reads its threshold from
+	// pg_trgm.word_similarity_threshold, set here for the statement.
 	sql := fmt.Sprintf(`
-		WITH _ AS (SELECT set_limit(@min_similarity))
+		WITH _ AS (SELECT set_config('pg_trgm.word_similarity_threshold', @min_similarity::text, true))
 		SELECT
 			sd.entity_type,
 			sd.entity_id,
 			sd.language,
-			SIMILARITY(sd.document, @q)::float4 AS score
+			WORD_SIMILARITY(@q, sd.document)::float4 AS score
 		FROM _, %s sd
 		%s
-		  AND sd.document %% @q
+		  AND @q <%% sd.document
 		ORDER BY score DESC, sd.entity_type ASC, sd.entity_id ASC
 		LIMIT @limit
 	`, table, where)
