@@ -5,9 +5,16 @@ import (
 	"fmt"
 	"strings"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/open-rails/searchkit/search"
 	"github.com/open-rails/searchkit/signal"
 )
+
+// recommendSeedConcurrency bounds how many seed queries are in flight at once.
+// One recommendation must not take the whole ClickHouse or Postgres pool: the
+// seeds are few, and the win is already in not waiting for each in turn.
+const recommendSeedConcurrency = 4
 
 // RecommendOptions controls Recommend ("for you": user → items).
 type RecommendOptions struct {
@@ -104,49 +111,76 @@ func (h *EmbeddedHub) Recommend(ctx context.Context, subject signal.Subject, opt
 	}
 
 	perSeed := clampInt(limit, 20, 100)
-	lists := make([][]search.RRFKey, 0, 2*len(seeds))
-	weights := make([]float32, 0, 2*len(seeds))
 	seedSet := map[signal.EntityRef]struct{}{}
 	for _, seed := range seeds {
 		seedSet[seed.EntityRef] = struct{}{}
 	}
 
-	for _, seed := range seeds {
-		// Content-based: nearest neighbours of the seed (when a semantic
-		// model is available).
+	// Each seed contributes a content list and a co-engagement list, and the two
+	// hit different stores. Run them together rather than one after another: a
+	// five-seed recommendation was ten sequential round trips, so its latency was
+	// the sum of every query rather than the slowest one. Results land in
+	// per-seed slots, so the fused list order stays exactly what it was —
+	// RRF weights are positional.
+	type seedLists struct {
+		similar   []search.RRFKey
+		coEngaged []search.RRFKey
+	}
+	perSeedLists := make([]seedLists, len(seeds))
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(recommendSeedConcurrency)
+	for i, seed := range seeds {
 		if model != "" {
-			sim, err := h.client.SimilarTo(ctx, seed.EntityType, seed.EntityID, SimilarOptions{
-				Language:    opts.Language,
-				Model:       model,
-				Limit:       perSeed,
-				EntityTypes: entityTypes,
-				FilterSQL:   opts.FilterSQL,
-				FilterArgs:  opts.FilterArgs,
+			group.Go(func() error {
+				sim, err := h.client.SimilarTo(groupCtx, seed.EntityType, seed.EntityID, SimilarOptions{
+					Language:    opts.Language,
+					Model:       model,
+					Limit:       perSeed,
+					EntityTypes: entityTypes,
+					FilterSQL:   opts.FilterSQL,
+					FilterArgs:  opts.FilterArgs,
+				})
+				if err != nil {
+					return err
+				}
+				keys := make([]search.RRFKey, 0, len(sim))
+				for _, s := range sim {
+					keys = append(keys, search.RRFKey{EntityType: s.EntityType, EntityID: s.EntityID})
+				}
+				perSeedLists[i].similar = keys
+				return nil
 			})
-			if err != nil {
-				return nil, err
-			}
-			keys := make([]search.RRFKey, 0, len(sim))
-			for _, s := range sim {
-				keys = append(keys, search.RRFKey{EntityType: s.EntityType, EntityID: s.EntityID})
-			}
-			lists = append(lists, keys)
-			weights = append(weights, simWeight)
 		}
 
-		// Collaborative: co-engagement with the seed.
-		co, err := store.CoEngaged(ctx, h.tenant, seed.EntityRef, signal.CoEngagedOptions{
-			EntityTypes: entityTypes,
-			Limit:       perSeed,
+		group.Go(func() error {
+			co, err := store.CoEngaged(groupCtx, h.tenant, seed.EntityRef, signal.CoEngagedOptions{
+				EntityTypes: entityTypes,
+				Limit:       perSeed,
+			})
+			if err != nil {
+				return err
+			}
+			keys := make([]search.RRFKey, 0, len(co))
+			for _, c := range co {
+				keys = append(keys, search.RRFKey{EntityType: c.EntityType, EntityID: c.EntityID})
+			}
+			perSeedLists[i].coEngaged = keys
+			return nil
 		})
-		if err != nil {
-			return nil, err
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	lists := make([][]search.RRFKey, 0, 2*len(seeds))
+	weights := make([]float32, 0, 2*len(seeds))
+	for _, perSeed := range perSeedLists {
+		if model != "" {
+			lists = append(lists, perSeed.similar)
+			weights = append(weights, simWeight)
 		}
-		keys := make([]search.RRFKey, 0, len(co))
-		for _, c := range co {
-			keys = append(keys, search.RRFKey{EntityType: c.EntityType, EntityID: c.EntityID})
-		}
-		lists = append(lists, keys)
+		lists = append(lists, perSeed.coEngaged)
 		weights = append(weights, coWeight)
 	}
 
