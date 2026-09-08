@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -89,7 +90,7 @@ func LexicalSearch(ctx context.Context, pool *pgxpool.Pool, query string, opts L
 	if minSim <= 0 {
 		minSim = 0.1
 	}
-	args["min_similarity"] = minSim
+	args["min_similarity"] = strconv.FormatFloat(float64(minSim), 'f', -1, 32)
 
 	// Documents concatenate every indexed field, so whole-string SIMILARITY between a
 	// short query and a long document is near zero and no realistic threshold matches.
@@ -97,7 +98,7 @@ func LexicalSearch(ctx context.Context, pool *pgxpool.Pool, query string, opts L
 	// instead; `<%` is its indexable form (gin_trgm_ops) and reads its threshold from
 	// pg_trgm.word_similarity_threshold, set here for the statement.
 	sql := fmt.Sprintf(`
-		WITH _ AS (SELECT set_config('pg_trgm.word_similarity_threshold', @min_similarity::text, true))
+		WITH _ AS (SELECT set_config('pg_trgm.word_similarity_threshold', @min_similarity, true))
 		SELECT
 			sd.entity_type,
 			sd.entity_id,
