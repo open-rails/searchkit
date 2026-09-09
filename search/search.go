@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -299,6 +300,34 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 
 	table := quotedSchema + ".embedding_vectors"
 
+	// The source vector is read first and then bound as a parameter. Joining it
+	// in as a CTE column made the ORDER BY a join condition, which no HNSW index
+	// can answer, so every "more like this" walked the whole corpus computing
+	// distances — at a cost set by the corpus rather than by the limit asked for.
+	var (
+		sourceVec  []float32
+		sourceDims int
+	)
+	err = pool.QueryRow(ctx, `
+		SELECT embedding::real[], vector_dims(embedding)
+		FROM `+table+`
+		WHERE entity_type = $1 AND entity_id = $2 AND model = $3 AND language = $4
+		  AND embedding IS NOT NULL
+		LIMIT 1
+	`, entityType, entityID, model, language).Scan(&sourceVec, &sourceDims)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No embedding for the source: nothing is similar to it, which is
+			// what the joined form returned too.
+			return []Hit{}, nil
+		}
+		return nil, err
+	}
+	if sourceDims <= 0 || len(sourceVec) == 0 {
+		return []Hit{}, nil
+	}
+	half := fmt.Sprintf("halfvec(%d)", sourceDims)
+
 	where := `
 		WHERE ev.model = @model
 		  AND ev.language = @language
@@ -311,6 +340,7 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		"model":       model,
 		"language":    language,
 		"limit":       limit,
+		"qvec":        pgvector.NewHalfVector(sourceVec),
 	}
 	if opts.MinSimilarityEnabled || opts.MinSimilarity > 0 {
 		args["min_similarity"] = opts.MinSimilarity
@@ -331,31 +361,43 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		}
 	}
 	if opts.MinSimilarityEnabled || opts.MinSimilarity > 0 {
-		where += " AND (1 - (ev.embedding <=> s.embedding)) >= @min_similarity\n"
+		where += fmt.Sprintf(" AND (1 - (ev.embedding::%s <=> (@qvec::%s))) >= @min_similarity\n", half, half)
 	}
 
 	// NOTE: SimilarTo always runs 1-stage cosine KNN. Callers can run TwoStage by
 	// fetching the source vector and calling SearchVectors with TwoStage=true.
+	// The ORDER BY casts to halfvec(dims) so it matches the per-model HNSW
+	// expression index; the trailing keys only break ties, which Postgres
+	// resolves with an incremental sort on top of the index scan.
 	sql := fmt.Sprintf(`
-		WITH source AS (
-			SELECT embedding
-			FROM %s
-			WHERE entity_type = @entity_type AND entity_id = @entity_id AND model = @model AND language = @language AND embedding IS NOT NULL
-			LIMIT 1
-		)
 		SELECT
 			ev.entity_type,
 			ev.entity_id,
 			ev.model,
 			ev.language,
-			(1 - (ev.embedding <=> s.embedding))::float4 AS similarity
-		FROM %s ev, source s
+			(1 - (ev.embedding::%s <=> (@qvec::%s)))::float4 AS similarity
+		FROM %s ev
 		%s
-		ORDER BY ev.embedding <=> s.embedding, ev.entity_type, ev.entity_id, ev.language, ev.model
+		ORDER BY ev.embedding::%s <=> (@qvec::%s), ev.entity_type, ev.entity_id, ev.language, ev.model
 		LIMIT @limit
-	`, table, table, where)
+	`, half, half, table, where, half, half)
 
-	rows, err := pool.Query(ctx, sql, args)
+	// An HNSW scan only visits ef_search candidates, 40 by default — a caller
+	// asking for more than that would quietly get fewer neighbours than the old
+	// full scan returned. Widen the candidate list for this statement alone,
+	// inside a transaction, so SET LOCAL reverts with it and no pooled
+	// connection keeps the setting.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", efSearchFor(limit))); err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.Query(ctx, sql, args)
 	if err != nil {
 		return nil, err
 	}
@@ -370,4 +412,22 @@ func SimilarTo(ctx context.Context, pool *pgxpool.Pool, schema string, entityTyp
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// efSearchFor sizes the HNSW candidate list for a query that wants `limit`
+// neighbours. Recall needs the list to be at least as long as the limit, and a
+// little beyond it, but the scan cost grows with it — so it is bounded.
+func efSearchFor(limit int) int {
+	const (
+		minEF = 40
+		maxEF = 1000
+	)
+	ef := limit * 2
+	if ef < minEF {
+		ef = minEF
+	}
+	if ef > maxEF {
+		ef = maxEF
+	}
+	return ef
 }
