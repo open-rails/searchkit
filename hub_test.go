@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,9 +19,15 @@ import (
 // --- fakes ---
 
 type hubFakeConn struct {
+	// Recommend queries its seeds concurrently, so the recording here is
+	// guarded — the real conn is a pool and safe for concurrent use.
+	mu      sync.Mutex
 	execs   []hubCapturedCall
 	queries []hubCapturedCall
 	rowsFor map[string][][]any // query substring -> rows
+	// rowsForArgs answers when the rows depend on which seed is asking, since
+	// two seeds send the same query text with different arguments.
+	rowsForArgs func(query string, args []any) ([][]any, bool)
 }
 
 type hubCapturedCall struct {
@@ -28,18 +36,43 @@ type hubCapturedCall struct {
 }
 
 func (f *hubFakeConn) Exec(_ context.Context, query string, args ...any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.execs = append(f.execs, hubCapturedCall{query: query, args: args})
 	return nil
 }
 
 func (f *hubFakeConn) Query(_ context.Context, query string, args ...any) (chdriver.Rows, error) {
+	f.mu.Lock()
 	f.queries = append(f.queries, hubCapturedCall{query: query, args: args})
-	for sub, rows := range f.rowsFor {
+	responder := f.rowsForArgs
+	rowsFor := f.rowsFor
+	f.mu.Unlock()
+
+	if responder != nil {
+		if rows, ok := responder(query, args); ok {
+			return &hubFakeRows{rows: rows}, nil
+		}
+	}
+	for sub, rows := range rowsFor {
 		if strings.Contains(query, sub) {
 			return &hubFakeRows{rows: rows}, nil
 		}
 	}
 	return &hubFakeRows{}, nil
+}
+
+// queryCount reports how many queries matched a substring.
+func (f *hubFakeConn) queryCount(sub string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, q := range f.queries {
+		if strings.Contains(q.query, sub) {
+			n++
+		}
+	}
+	return n
 }
 
 type hubFakeRows struct {
@@ -309,6 +342,63 @@ func TestHubRecommendUsesCoEngagementAndExcludesSeen(t *testing.T) {
 	for _, r := range got {
 		if r.EntityID == "gSeen" || r.EntityID == "seed1" {
 			t.Fatalf("seen/seed leaked into recs: %+v", got)
+		}
+	}
+}
+
+func TestHubRecommendFusesEverySeedsCoEngagement(t *testing.T) {
+	now := time.Now().UTC()
+	stateRow := func(id string, score int16) []any {
+		return []any{"gallery", id, now, now, uint32(3), uint32(10), uint32(10), true, "", true, score, float64(0)}
+	}
+	// Two seeds, each with its own co-engagement list. gShared sits in both, so
+	// it must outrank the candidates that only one seed contributes.
+	bySeed := map[string][][]any{
+		"seed1": {{"gallery", "gShared", int64(9)}, {"gallery", "gOne", int64(7)}},
+		"seed2": {{"gallery", "gShared", int64(8)}, {"gallery", "gTwo", int64(6)}},
+	}
+	fc := &hubFakeConn{
+		rowsFor: map[string][][]any{
+			"ORDER BY last_score DESC": {stateRow("seed1", int16(90)), stateRow("seed2", int16(80))},
+		},
+		rowsForArgs: func(query string, args []any) ([][]any, bool) {
+			if !strings.Contains(query, "NOT (entity_type = ? AND entity_id = ?)") {
+				return nil, false
+			}
+			for _, a := range args {
+				if id, ok := a.(string); ok {
+					if rows, found := bySeed[id]; found {
+						return rows, true
+					}
+				}
+			}
+			return nil, false
+		},
+	}
+	h := newTestHub(t, fc, nil) // no DefaultModel -> vector source skipped
+
+	got, err := h.Recommend(context.Background(), signal.Subject{UserID: "u1"}, RecommendOptions{
+		EntityTypes: []string{"gallery"},
+		Limit:       5,
+		IncludeSeen: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if n := fc.queryCount("NOT (entity_type = ? AND entity_id = ?)"); n != 2 {
+		t.Fatalf("co-engagement queries = %d, want one per seed", n)
+	}
+	ids := make([]string, 0, len(got))
+	for _, r := range got {
+		ids = append(ids, r.EntityID)
+	}
+	if len(ids) == 0 || ids[0] != "gShared" {
+		t.Fatalf("gShared should rank first on two seeds' lists: %v", ids)
+	}
+	for _, want := range []string{"gOne", "gTwo"} {
+		if !slices.Contains(ids, want) {
+			t.Fatalf("%s missing — a seed's list was dropped: %v", want, ids)
 		}
 	}
 }
