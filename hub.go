@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/open-rails/searchkit/search"
 	"github.com/open-rails/searchkit/signal"
@@ -396,43 +398,67 @@ func (h *EmbeddedHub) SimilarTo(ctx context.Context, entityType, entityID string
 	if model == "" {
 		model = h.client.defaultModel
 	}
-	if model != "" {
-		simOpts := opts.SimilarOptions
-		simOpts.Limit = clampInt(limit*2, limit, 200)
-		vec, err := h.client.SimilarTo(ctx, entityType, entityID, simOpts)
-		if err != nil {
-			return nil, err
-		}
-		keys := make([]search.RRFKey, 0, len(vec))
-		for _, v := range vec {
-			keys = append(keys, search.RRFKey{EntityType: v.EntityType, EntityID: v.EntityID})
-		}
-		lists = append(lists, keys)
-		weights = append(weights, 1)
-	}
 
+	// The two sources are independent and live in different stores, so they run
+	// together; the fused order is unchanged because the lists are appended
+	// afterwards in their original order, and RRF weights are positional.
+	var (
+		vectorKeys []search.RRFKey
+		coKeys     []search.RRFKey
+	)
+	group, groupCtx := errgroup.WithContext(ctx)
+	if model != "" {
+		group.Go(func() error {
+			simOpts := opts.SimilarOptions
+			simOpts.Limit = clampInt(limit*2, limit, 200)
+			vec, err := h.client.SimilarTo(groupCtx, entityType, entityID, simOpts)
+			if err != nil {
+				return err
+			}
+			keys := make([]search.RRFKey, 0, len(vec))
+			for _, v := range vec {
+				keys = append(keys, search.RRFKey{EntityType: v.EntityType, EntityID: v.EntityID})
+			}
+			vectorKeys = keys
+			return nil
+		})
+	}
 	if opts.CoEngagement {
 		store, err := h.requireStore()
 		if err != nil {
 			return nil, err
 		}
-		co, err := store.CoEngaged(ctx, h.tenant, signal.EntityRef{EntityType: entityType, EntityID: entityID}, signal.CoEngagedOptions{
-			EntityTypes: opts.EntityTypes,
-			Window:      opts.CoEngagementWindow,
-			Limit:       clampInt(limit*2, limit, 200),
+		group.Go(func() error {
+			co, err := store.CoEngaged(groupCtx, h.tenant, signal.EntityRef{EntityType: entityType, EntityID: entityID}, signal.CoEngagedOptions{
+				EntityTypes: opts.EntityTypes,
+				Window:      opts.CoEngagementWindow,
+				Limit:       clampInt(limit*2, limit, 200),
+			})
+			if err != nil {
+				return err
+			}
+			keys := make([]search.RRFKey, 0, len(co))
+			for _, c := range co {
+				keys = append(keys, search.RRFKey{EntityType: c.EntityType, EntityID: c.EntityID})
+			}
+			coKeys = keys
+			return nil
 		})
-		if err != nil {
-			return nil, err
-		}
-		keys := make([]search.RRFKey, 0, len(co))
-		for _, c := range co {
-			keys = append(keys, search.RRFKey{EntityType: c.EntityType, EntityID: c.EntityID})
-		}
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
+	if model != "" {
+		lists = append(lists, vectorKeys)
+		weights = append(weights, 1)
+	}
+	if opts.CoEngagement {
 		w := opts.CoEngagementWeight
 		if w <= 0 {
 			w = 1
 		}
-		lists = append(lists, keys)
+		lists = append(lists, coKeys)
 		weights = append(weights, w)
 	}
 
